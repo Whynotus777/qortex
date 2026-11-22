@@ -1,0 +1,34 @@
+# Status and limits
+
+This is version 0.1. It proves the pipeline end to end. Here is what it does not do.
+
+## Models
+
+- The only model family you can train here is `qortex/mlp-bc`: small state-based behavior-cloning networks. No vision, no language.
+- SmolVLA, ACT, pi0, GR00T and OpenVLA are in the catalog and the router. Fine-tune jobs for them are accepted and then wait, because no GPU worker backend exists yet.
+- Pi API and Dream API are listed for comparison only. Qortex does not call them.
+
+## Router
+
+- Third-party model figures (parameters, memory, licences, prices) are approximate and taken from public sources. They have not been verified or benchmarked here.
+- `estimated_hz` is a rough heuristic.
+- Check each model's licence yourself before commercial use.
+
+## Sim
+
+- Three small tasks. They are kinematic or near-kinematic and have no obstacles, sensor noise, latency or contact.
+- The drone task does not simulate rotors or attitude.
+- There is no way yet to upload your own MJCF or URDF as a sim twin.
+- Eval latency is measured on the eval host, not on your robot's computer.
+
+## Runtime
+
+- Python only. No ROS 2 node, no C++ runtime.
+- No safety layer. The policy output is clipped to `[-1, 1]` and nothing else. Velocity limits, geofences, collision checks and e-stops are your responsibility.
+- The hardware adapters in these docs have not been run on physical robots.
+
+## Platform
+
+- Single process, SQLite, one inline worker. Jobs run one at a time.
+- Plain-text API keys, open signup, no rate limits, no billing.
+- No dashboard. Everything is API and SDK.

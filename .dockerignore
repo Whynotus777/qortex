@@ -1,0 +1,4 @@
+data/
+site/
+.git/
+__pycache__/
