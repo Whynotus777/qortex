@@ -19,7 +19,7 @@ tests/e2e.py   full pipeline test for arm, mobile base, drone and a custom robot
 
 ```bash
 pip install -r requirements.txt
-python scripts/gen_api_docs.py && mkdocs build
+python scripts/build_docs.py
 uvicorn server.app:app --port 8000
 python tests/e2e.py http://localhost:8000
 ```
@@ -28,8 +28,8 @@ Docs are then at http://localhost:8000, the interactive API reference at `/refer
 
 ## Deploy
 
-`render.yaml` is a Render blueprint (Docker web service + 1 GB disk). See `docs/self-hosting.md`.
-The Dockerfile has not been built in CI yet.
+Vercel: import the repo, add a Postgres database from the Storage tab, redeploy, add a domain.
+Details and the container option are in `docs/self-hosting.md`.
 
 ## What is real and what is not
 

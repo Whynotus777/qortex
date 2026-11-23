@@ -45,5 +45,5 @@ for tag, ops in tags.items():
         body = op.get("requestBody", {}).get("content", {}).get("application/json", {}).get("schema", {})
         if "$ref" in body:
             out += ["| Field | Type | Required | Default | Description |", "|---|---|---|---|---|", *fields(body["$ref"]), ""]
-open(os.path.join(os.path.dirname(__file__), "..", "docs", "api.md"), "w").write("\n".join(out) + "\n")
-print("wrote docs/api.md", sum(len(v) for v in tags.values()), "endpoints")
+open(os.path.join(os.path.dirname(__file__), "..", "docs", "api-reference.md"), "w").write("\n".join(out) + "\n")
+print("wrote docs/api-reference.md", sum(len(v) for v in tags.values()), "endpoints")

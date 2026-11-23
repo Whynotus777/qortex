@@ -1,14 +1,14 @@
 """Qortex control plane. One process: API, inline worker, docs site.
 
 Run:  uvicorn server.app:app --port 8000
-Env:  QORTEX_DATA (dir, default ./data)   QORTEX_INLINE_WORKER (1/0)
+Env:  DATABASE_URL (Postgres; else SQLite in QORTEX_DATA)   QORTEX_INLINE_WORKER (1/0)
+      QORTEX_SYNC_JOBS (1 = run jobs inside the request; default on Vercel)
       QORTEX_WORKER_TOKEN (enables remote workers)   QORTEX_SIGNUP (1/0)
 """
 import base64
-import json
+import hashlib
 import os
 import secrets
-import sqlite3
 import threading
 import time
 import traceback
@@ -21,93 +21,55 @@ from pydantic import BaseModel, Field
 
 from qortex_core import envs, jobs
 from qortex_core.policy import Policy, sha256
-from . import router
+from . import db, router
 
-DATA = os.environ.get("QORTEX_DATA", "./data")
-os.makedirs(DATA, exist_ok=True)
 WORKER_TOKEN = os.environ.get("QORTEX_WORKER_TOKEN", "")
 ROBOT_TYPES = list(envs.ENVS) + ["custom"]
+# Serverless hosts have no background process, so jobs run inside the request.
+SYNC_JOBS = os.environ.get("QORTEX_SYNC_JOBS", "1" if os.environ.get("VERCEL") else "0") == "1"
 
-_db = sqlite3.connect(os.path.join(DATA, "qortex.db"), check_same_thread=False)
-_db.execute("CREATE TABLE IF NOT EXISTS obj (id TEXT PRIMARY KEY, kind TEXT, owner TEXT, created REAL, data TEXT)")
-_db.execute("CREATE INDEX IF NOT EXISTS obj_kind ON obj (kind, owner, created)")
-_lock = threading.RLock()
-
-
-def new_id(prefix):
-    return f"{prefix}_{secrets.token_hex(6)}"
-
-
-def put(kind, owner, data, id=None):
-    id = id or new_id(kind[:3])
-    data = dict(data, id=id, created=data.get("created", round(time.time(), 3)))
-    with _lock:
-        _db.execute("INSERT OR REPLACE INTO obj VALUES (?,?,?,?,?)", (id, kind, owner, data["created"], json.dumps(data)))
-        _db.commit()
-    return data
+new_id, put, update, listing, write_blob, read_blob = db.new_id, db.put, db.update, db.listing, db.write_blob, db.read_blob
 
 
 def get(kind, id, owner=None):
-    with _lock:
-        row = _db.execute("SELECT owner, data FROM obj WHERE id=? AND kind=?", (id, kind)).fetchone()
-    if not row or (owner is not None and row[0] != owner):
-        raise HTTPException(404, f"{kind} '{id}' not found")
-    return json.loads(row[1])
+    try:
+        return db.get(kind, id, owner)
+    except db.NotFound as e:
+        raise HTTPException(404, str(e))
 
 
-def update(kind, id, **fields):
-    with _lock:
-        row = _db.execute("SELECT owner, data FROM obj WHERE id=? AND kind=?", (id, kind)).fetchone()
-        data = dict(json.loads(row[1]), **fields)
-        _db.execute("UPDATE obj SET data=? WHERE id=?", (json.dumps(data), id))
-        _db.commit()
-    return data
-
-
-def listing(kind, owner, **where):
-    with _lock:
-        rows = _db.execute("SELECT data FROM obj WHERE kind=? AND owner=? ORDER BY created DESC", (kind, owner)).fetchall()
-    out = [json.loads(r[0]) for r in rows]
-    return [o for o in out if all(o.get(k) == v for k, v in where.items())]
-
-
-def blob_path(id):
-    return os.path.join(DATA, f"{id}.bin")
-
-
-def write_blob(id, b):
-    with open(blob_path(id), "wb") as f:
-        f.write(b)
-
-
-def read_blob(id):
-    with open(blob_path(id), "rb") as f:
-        return f.read()
+def _key_id(secret):
+    return "key_" + hashlib.sha256(secret.encode()).hexdigest()[:32]
 
 
 # ---------------------------------------------------------------- auth
 
 def auth(authorization: str = Header(default="")):
     key = authorization.removeprefix("Bearer ").strip()
-    with _lock:
-        row = _db.execute("SELECT id FROM obj WHERE kind='key' AND json_extract(data,'$.secret')=?", (key,)).fetchone()
-    if not key or not row:
+    try:
+        if not key:
+            raise db.NotFound("")
+        return db.get("key", _key_id(key))["id"]
+    except db.NotFound:
         raise HTTPException(401, "missing or invalid API key. Send 'Authorization: Bearer qx_...'")
-    return row[0]
 
 
 # ---------------------------------------------------------------- jobs
 
 def enqueue(owner, kind, params, blobs, target=None, backend="native"):
     """blobs: {name: blob_id}. target: (obj_kind, obj_id) updated on finish."""
-    return put("job", owner, {"kind": kind, "params": params, "blobs": blobs, "target": target,
-                              "backend": backend, "status": "queued", "logs": [], "result": None, "error": None})
+    job = put("job", owner, {"kind": kind, "params": params, "blobs": blobs, "target": target,
+                             "backend": backend, "status": "queued", "logs": [], "result": None, "error": None})
+    if SYNC_JOBS and backend in jobs.BACKENDS:
+        update("job", job["id"], status="claimed")
+        _run_inline(job)
+        job = get("job", job["id"])
+    return job
 
 
 def _finish(job, result, artifact):
     """Apply a finished job's result to the object it was working on."""
-    owner_row = _db.execute("SELECT owner FROM obj WHERE id=?", (job["id"],)).fetchone()
-    owner = owner_row[0]
+    owner = db.owner_of(job["id"])
     kind, target = job["kind"], job["target"]
     if kind == "generate":
         write_blob(target[1], artifact)
@@ -149,10 +111,8 @@ def _fail(job, error, detail=""):
 
 
 def _claim(backends):
-    with _lock:
-        rows = _db.execute("SELECT data FROM obj WHERE kind='job' AND json_extract(data,'$.status')='queued' ORDER BY created").fetchall()
-        for r in rows:
-            j = json.loads(r[0])
+    with db._lock:
+        for j in db.queued_jobs():
             if j["backend"] in backends:
                 update("job", j["id"], status="claimed")
                 return j
@@ -188,7 +148,7 @@ app = FastAPI(title="Qortex API", version="0.1.0", docs_url="/reference", redoc_
 
 @app.on_event("startup")
 def _startup():
-    if os.environ.get("QORTEX_INLINE_WORKER", "1") == "1":
+    if not SYNC_JOBS and os.environ.get("QORTEX_INLINE_WORKER", "1") == "1":
         threading.Thread(target=_worker_loop, daemon=True).start()
 
 
@@ -210,8 +170,9 @@ class KeyIn(BaseModel):
 def create_key(body: KeyIn):
     if os.environ.get("QORTEX_SIGNUP", "1") != "1":
         raise HTTPException(403, "signup is disabled on this server")
-    k = put("key", "-", {"email": body.email, "secret": "qx_" + secrets.token_urlsafe(24)})
-    return {"api_key": k["secret"], "note": "Store this now. It is not shown again."}
+    secret = "qx_" + secrets.token_urlsafe(24)
+    put("key", "-", {"email": body.email}, id=_key_id(secret))      # only a hash of the key is stored
+    return {"api_key": secret, "note": "Store this now. It is not shown again."}
 
 
 # -- catalog and router
@@ -359,8 +320,9 @@ def generate(id: str, body: GenerateIn, owner: str = Depends(auth)):
     if d["robot_type"] not in envs.ENVS:
         raise HTTPException(422, "sim generation is only available for built-in robot types. Upload episodes instead.")
     blobs = {"dataset": id} if d["steps"] else {}
+    update("dataset", id, status="generating")
     job = enqueue(owner, "generate", dict(body.model_dump(), robot_type=d["robot_type"]), blobs, ("dataset", id))
-    return update("dataset", id, status="generating", job_id=job["id"])
+    return update("dataset", id, job_id=job["id"])
 
 
 @app.get("/v1/datasets/{id}", tags=["Datasets"], summary="Get a dataset")
@@ -642,7 +604,7 @@ def worker_finish(id: str, body: FinishIn):
     return {"ok": True}
 
 
-# -- docs site (built by mkdocs into ./site)
-_site = os.path.join(os.path.dirname(os.path.dirname(__file__)), "site")
-if os.path.isdir(_site):
+# -- docs site. Built by mkdocs into ./public. On Vercel the platform serves public/ from its CDN.
+_site = os.path.join(os.path.dirname(os.path.dirname(__file__)), "public")
+if os.path.isdir(_site) and not os.environ.get("VERCEL"):
     app.mount("/", StaticFiles(directory=_site, html=True), name="docs")

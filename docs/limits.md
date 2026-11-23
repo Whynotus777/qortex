@@ -29,6 +29,7 @@ This is version 0.1. It proves the pipeline end to end. Here is what it does not
 
 ## Platform
 
-- Single process, SQLite, one inline worker. Jobs run one at a time.
-- Plain-text API keys, open signup, no rate limits, no billing.
+- On Vercel, jobs run inside the request, so each one must finish within 300 seconds. That is fine for the built-in policies and rules out GPU-scale training there.
+- Updates are read-modify-write with no row locking. Two simultaneous writes to the same object can lose one.
+- Open signup, no rate limits, no billing.
 - No dashboard. Everything is API and SDK.

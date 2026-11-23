@@ -21,7 +21,7 @@ qx.deploy(student["id"], robot["id"], min_success_rate=0.9)
 ```
 
 [Start the quickstart](quickstart.md){ .md-button .md-button--primary }
-[API reference](api.md){ .md-button }
+[API reference](api-reference.md){ .md-button }
 
 ## What works today
 

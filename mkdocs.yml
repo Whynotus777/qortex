@@ -1,5 +1,7 @@
 site_name: Qortex Docs
 site_description: Model routing and a cloud-to-robot policy pipeline
+use_directory_urls: false
+site_dir: public
 theme:
   name: material
   palette:
@@ -23,7 +25,7 @@ nav:
       - Drone: robots/drone.md
       - Custom robot: robots/custom.md
   - Model catalog: models.md
-  - API reference: api.md
+  - API reference: api-reference.md
   - Self-hosting and workers: self-hosting.md
   - Status and limits: limits.md
 markdown_extensions:
