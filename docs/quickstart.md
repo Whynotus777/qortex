@@ -14,7 +14,7 @@ pip install ./sdk mujoco
 ## 2. Get an API key
 
 ```bash
-export QORTEX_URL=https://YOUR-HOST
+export QORTEX_URL=https://qortex.quantumroboticslab.ai
 curl -s -X POST $QORTEX_URL/v1/keys -H 'content-type: application/json' \
   -d '{"email": "you@example.com"}'
 export QORTEX_API_KEY=qx_...

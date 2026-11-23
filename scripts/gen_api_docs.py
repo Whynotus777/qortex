@@ -21,7 +21,7 @@ def fields(ref):
     return rows
 
 out = ["# API reference", "",
-       "Base URL: your server, for example `https://YOUR-HOST`. All endpoints are under `/v1`.", "",
+       "Base URL: your server, for example `https://qortex.quantumroboticslab.ai`. All endpoints are under `/v1`.", "",
        "An interactive version of this page, generated from the same schema, is at [`/reference`](/reference).", "",
        "## Authentication", "",
        "Send your key as a bearer token on every request except `POST /v1/keys`, `GET /v1/models` and `GET /v1/devices`.", "",

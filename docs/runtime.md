@@ -4,7 +4,7 @@ The runtime is a small Python agent. Its only dependency is numpy, so it runs on
 
 ```bash
 pip install ./sdk          # from the repo
-export QORTEX_URL=https://YOUR-HOST QORTEX_API_KEY=qx_...
+export QORTEX_URL=https://qortex.quantumroboticslab.ai QORTEX_API_KEY=qx_...
 ```
 
 ```python
