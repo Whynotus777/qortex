@@ -159,7 +159,7 @@ def _http_err(_, exc):
 
 @app.get("/healthz", include_in_schema=False)
 def healthz():
-    return {"ok": True, "version": app.version}
+    return {"ok": True, "version": app.version, "storage": db.storage(), "jobs": "in-request" if SYNC_JOBS else "worker"}
 
 
 class KeyIn(BaseModel):

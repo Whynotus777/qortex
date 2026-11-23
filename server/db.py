@@ -23,7 +23,9 @@ def _connect():
         _conn = psycopg.connect(PG_URL, autocommit=True)
         blob_t = "BYTEA"
     else:
-        data = os.environ.get("QORTEX_DATA", "./data")
+        # Serverless hosts have a read-only filesystem. Without a database, fall back to
+        # /tmp so the API responds, but data there is lost whenever the instance recycles.
+        data = os.environ.get("QORTEX_DATA", "/tmp/qortex" if os.environ.get("VERCEL") else "./data")
         os.makedirs(data, exist_ok=True)
         _conn = sqlite3.connect(os.path.join(data, "qortex.db"), check_same_thread=False, isolation_level=None)
         blob_t = "BLOB"
@@ -50,6 +52,12 @@ def q(sql, params=()):
                 if attempt or not dropped:
                     raise
                 _conn = None
+
+
+def storage():
+    if PG_URL:
+        return "postgres"
+    return "ephemeral: no database connected, data will be lost" if os.environ.get("VERCEL") else "sqlite"
 
 
 class NotFound(Exception):
