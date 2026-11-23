@@ -1,0 +1,7 @@
+# Docs site only. The API needs a container host (see docs/self-hosting.md).
+[build]
+  command = "pip install 'mkdocs>=1.6,<2' 'mkdocs-material>=9.5,<10' && mkdocs build"
+  publish = "site"
+
+[build.environment]
+  PYTHON_VERSION = "3.12"
