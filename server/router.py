@@ -93,12 +93,16 @@ def recommend(robot, task, constraints, measured=None):
             fit = "cloud_teacher"
 
         ev = "published-specs"
-        if m["id"] in measured:
+        e = measured.get(m["id"])
+        if e and e.get("mode") == "sim" and e.get("success_rate") is not None:
             ev = "measured"
-            sr = measured[m["id"]].get("success_rate")
-            if sr is not None:
-                score += 0.2 * sr
-                why.append(f"measured {sr:.0%} success in your sim evals")
+            score += 0.2 * e["success_rate"]
+            why.append(f"measured {e['success_rate']:.0%} success in your closed-loop sim evals")
+        elif e and e.get("mode") == "offline":
+            ev = "offline-check"
+            score += 0.05 if m["runnable"] else 0
+            why.append(f"offline action MSE {e.get('action_mse')} on "
+                       f"{'held-out episodes' if e.get('validated') else 'training data'} for this robot type; not a closed-loop result")
         elif m["runnable"]:
             score += 0.05
             why.append("can be trained and evaluated on this platform today")
@@ -126,7 +130,19 @@ def recommend(robot, task, constraints, measured=None):
             pipeline = [f"fine-tune {teachers[0]['model']} in the cloud as teacher",
                         f"distill into {students[0] if students else 'a smaller student'}",
                         "evaluate student against teacher in sim", "deploy student to robot"]
+    blocked = [mid for mid in MODELS if pipeline and not MODELS[mid]["runnable"] and any(mid in st for st in pipeline)]
+    runnable = [r for r in ranked if r["runnable_here"]]
+    alternative = None
+    if blocked and runnable:
+        alternative = {"model": runnable[0]["model"],
+                       "steps": [f"fine-tune {runnable[0]['model']} on your dataset", "evaluate", "deploy to robot"],
+                       "tradeoff": "; ".join(runnable[0]["caveats"]) or None}
     return {"recommendations": ranked, "excluded": excluded, "suggested_pipeline": pipeline,
+            "pipeline_executable_here": bool(pipeline) and not blocked,
+            "pipeline_blocked_by": [{"model": mid, "reason": "no training backend for this model on this platform yet"} for mid in blocked],
+            "executable_alternative": alternative,
+            "executable_alternative_note": None if not blocked or alternative else
+                "No model that can be trained on this platform today meets these requirements.",
             "inputs": {"robot_type": robot["type"], "compute": robot.get("compute"), "task_kind": kind,
                        "deploy": deploy, "min_hz": min_hz, "power_budget_w": power},
             "note": NOTE}

@@ -15,6 +15,7 @@ import traceback
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -135,14 +136,20 @@ def _start_eval(owner, pol, episodes, seed=10_000):
     blobs = {"policy": pol["id"]}
     if mode == "offline":
         blobs["dataset"] = pol["dataset_id"]
-    job = enqueue(owner, "eval", {"mode": mode, "robot_type": pol["robot_type"], "episodes": episodes, "seed": seed},
+    job = enqueue(owner, "eval", {"mode": mode, "robot_type": pol["robot_type"], "episodes": episodes, "seed": seed,
+                                  "holdout_episodes": pol.get("holdout_episodes", 0)},
                   blobs, ("eval", ev["id"]))
     return update("eval", ev["id"], job_id=job["id"])
 
 
 # ---------------------------------------------------------------- app
 
+_ERR = {"content": {"application/json": {"schema": {"type": "object", "properties": {"error": {"type": "string"}}}}}}
 app = FastAPI(title="Qortex API", version="0.1.0", docs_url="/reference", redoc_url=None,
+              responses={401: {"description": "Missing or invalid API key", **_ERR},
+                         404: {"description": "Not found, or owned by another key", **_ERR},
+                         409: {"description": "Object is not in the right state yet", **_ERR},
+                         422: {"description": "Invalid request", **_ERR}},
               description="Model routing and a cloud-to-robot policy pipeline: fine-tune, distill, evaluate in sim, deploy.")
 
 
@@ -155,6 +162,12 @@ def _startup():
 @app.exception_handler(HTTPException)
 def _http_err(_, exc):
     return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
+
+
+@app.exception_handler(RequestValidationError)
+def _validation_err(_, exc):
+    parts = [f"{'.'.join(str(x) for x in e['loc'] if x != 'body') or 'body'}: {e['msg']}" for e in exc.errors()]
+    return JSONResponse({"error": "invalid request: " + "; ".join(parts), "fields": parts}, status_code=422)
 
 
 @app.get("/healthz", include_in_schema=False)
@@ -313,10 +326,14 @@ def add_episodes(id: str, body: EpisodesIn, owner: str = Depends(auth)):
                                  f"got {obs.shape} and {act.shape}")
     if np.abs(act).max() > 1.0001:
         raise HTTPException(422, "actions must be normalised to [-1, 1]")
+    lens = np.array([len(e.observations) for e in body.episodes], np.int64)
+    if (lens == 0).any():
+        raise HTTPException(422, "every episode needs at least one step")
     if d["steps"]:
-        o0, a0 = jobs.unpack(read_blob(id))
-        obs, act = np.concatenate([o0, obs]), np.concatenate([a0, act])
-    write_blob(id, jobs.pack(obs, act))
+        old = read_blob(id)
+        o0, a0 = jobs.unpack(old)
+        obs, act, lens = np.concatenate([o0, obs]), np.concatenate([a0, act]), np.concatenate([jobs.ep_lens(old), lens])
+    write_blob(id, jobs.pack(obs, act, lens))
     return update("dataset", id, steps=int(len(obs)), episodes=d["episodes"] + len(body.episodes), status="ready")
 
 
@@ -368,11 +385,13 @@ def create_policy(body: PolicyIn, owner: str = Depends(auth)):
     if d["robot_id"] != r["id"]:
         raise HTTPException(422, "dataset belongs to a different robot")
     backend = "native" if m["runnable"] else "gpu:" + m["id"]
+    # No sim task for this robot type: reserve whole episodes so the offline eval is on unseen data.
+    holdout = 0 if r["type"] in envs.ENVS else (max(1, round(0.2 * d["episodes"])) if d["episodes"] >= 2 else 0)
     pol = put("policy", owner, {"name": body.name, "robot_id": r["id"], "robot_type": r["type"], "dataset_id": d["id"],
                                 "base_model": m["id"], "parent_policy_id": None, "stage": "finetuned", "quantize": "none",
                                 "status": "queued" if m["runnable"] else "waiting_for_gpu_worker",
-                                "auto_eval": body.auto_eval, "latest_eval": None})
-    job = enqueue(owner, "finetune", {"hidden": body.hidden, "epochs": body.epochs,
+                                "holdout_episodes": holdout, "auto_eval": body.auto_eval, "latest_eval": None})
+    job = enqueue(owner, "finetune", {"hidden": body.hidden, "epochs": body.epochs, "holdout_episodes": holdout,
                                       "meta": {"policy_id": pol["id"], "base_model": m["id"], "robot_type": r["type"]}},
                   {"dataset": d["id"]}, ("policy", pol["id"]), backend)
     pol = update("policy", pol["id"], job_id=job["id"])
@@ -392,8 +411,10 @@ def distill(id: str, body: DistillIn, owner: str = Depends(auth)):
     pol = put("policy", owner, {"name": t["name"] + "-student", "robot_id": t["robot_id"], "robot_type": t["robot_type"],
                                 "dataset_id": t["dataset_id"], "base_model": t["base_model"], "parent_policy_id": t["id"],
                                 "stage": "distilled", "quantize": body.quantize, "status": "queued",
+                                "holdout_episodes": t.get("holdout_episodes", 0),
                                 "auto_eval": body.auto_eval, "latest_eval": None})
     job = enqueue(owner, "distill", {"hidden": body.hidden, "epochs": body.epochs, "quantize": body.quantize,
+                                     "holdout_episodes": t.get("holdout_episodes", 0),
                                      "meta": {"policy_id": pol["id"], "parent_policy_id": t["id"],
                                               "base_model": t["base_model"], "robot_type": t["robot_type"]}},
                   {"teacher": t["id"], "dataset": t["dataset_id"]}, ("policy", pol["id"]))
@@ -410,7 +431,10 @@ def get_policy(id: str, owner: str = Depends(auth)):
     return get("policy", id, owner)
 
 
-@app.get("/v1/policies/{id}/artifact", tags=["Policies"], summary="Download the policy artifact (.npz)")
+@app.get("/v1/policies/{id}/artifact", tags=["Policies"], summary="Download the policy artifact (.npz)",
+         response_class=Response,
+         responses={200: {"description": "The policy artifact, a binary .npz file. Its SHA-256 is in the X-Qortex-Sha256 header.",
+                          "content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}}})
 def artifact(id: str, owner: str = Depends(auth)):
     p = get("policy", id, owner)
     if p["status"] != "ready":
@@ -477,7 +501,8 @@ class DeployIn(BaseModel):
     force: bool = Field(False, description="Deploy even if the gate fails. Recorded on the deployment.")
 
 
-@app.post("/v1/deployments", tags=["Deployments"], summary="Deploy a policy to a robot, gated on its eval")
+@app.post("/v1/deployments", tags=["Deployments"], summary="Deploy a policy to a robot, gated on its eval",
+          responses={412: {"description": "Deployment blocked by the eval gate", **_ERR}})
 def deploy(body: DeployIn, owner: str = Depends(auth)):
     p, r = get("policy", body.policy_id, owner), get("robot", body.robot_id, owner)
     if p["status"] != "ready":
@@ -491,10 +516,12 @@ def deploy(body: DeployIn, owner: str = Depends(auth)):
         passed, reason = False, "policy has no eval yet"
     elif ev.get("mode") == "sim" and body.gate.min_success_rate is not None and ev["success_rate"] < body.gate.min_success_rate:
         passed, reason = False, f"sim success {ev['success_rate']:.0%} is below the gate {body.gate.min_success_rate:.0%}"
+    elif ev.get("mode") == "offline" and not ev.get("validated"):
+        passed, reason = False, "the offline eval had no held-out episodes, so this policy has not been validated on unseen data"
     elif ev.get("mode") == "offline" and body.gate.max_action_mse is not None and ev["action_mse"] > body.gate.max_action_mse:
         passed, reason = False, f"offline action MSE {ev['action_mse']} is above the gate {body.gate.max_action_mse}"
     elif ev.get("mode") == "offline" and body.gate.max_action_mse is None:
-        reason = "no sim task for this robot type and no max_action_mse set: deployed without a real gate"
+        passed, reason = False, "custom robots are gated on max_action_mse; set it, or pass force=true"
     if not passed and not body.force:
         raise HTTPException(412, f"deployment blocked: {reason}. Pass force=true to override.")
     prev = [d for d in listing("deployment", owner, robot_id=r["id"]) if d["active"]]
@@ -524,6 +551,7 @@ def current(id: str, owner: str = Depends(auth)):
 
 @app.post("/v1/robots/{id}/rollback", tags=["Deployments"], summary="Roll back to the previous deployment")
 def rollback(id: str, owner: str = Depends(auth)):
+    get("robot", id, owner)
     d = _current(owner, id)
     if not d or not d.get("previous_deployment_id"):
         raise HTTPException(409, "nothing to roll back to")
@@ -533,6 +561,7 @@ def rollback(id: str, owner: str = Depends(auth)):
 
 @app.get("/v1/robots/{id}/deployments", tags=["Deployments"], summary="Deployment history for a robot")
 def history(id: str, owner: str = Depends(auth)):
+    get("robot", id, owner)
     return {"deployments": listing("deployment", owner, robot_id=id)}
 
 
@@ -553,11 +582,14 @@ class TelemetryIn(BaseModel):
 @app.post("/v1/robots/{id}/telemetry", tags=["Telemetry"], summary="Report runtime stats from the robot")
 def telemetry(id: str, body: TelemetryIn, owner: str = Depends(auth)):
     get("robot", id, owner)
+    if not (body.steps or body.episodes or body.extra or body.loop_hz):
+        raise HTTPException(422, "empty telemetry report: send at least steps, episodes, loop_hz or extra")
     return put("telemetry", owner, dict(body.model_dump(), robot_id=id), id=new_id("tel"))
 
 
 @app.get("/v1/robots/{id}/telemetry", tags=["Telemetry"], summary="Recent telemetry for a robot")
 def get_telemetry(id: str, limit: int = 20, owner: str = Depends(auth)):
+    get("robot", id, owner)
     return {"telemetry": listing("telemetry", owner, robot_id=id)[:limit]}
 
 

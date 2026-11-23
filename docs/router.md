@@ -27,12 +27,18 @@ rec = qx.recommend(
 Each recommendation has:
 
 - `fit`: `direct`, `needs_quantization`, `needs_distillation`, `on_prem_gpu`, `cloud` or `cloud_teacher`
-- `evidence`: `measured` if this account has a sim scorecard for that base model on that robot type, otherwise `published-specs`
+- `evidence`: `measured` if this account has a closed-loop sim scorecard for that base model on that robot type, `offline-check` if it only has an offline eval (custom robots), otherwise `published-specs`
 - `estimated_hz`: a rough figure from parameter count and device class. It is an estimate, not a benchmark.
 - `why` and `caveats`: the reasons behind the score
 - `runnable_here`: whether this platform can train the model today
 
 The response also lists `excluded` models with the reason, and a `suggested_pipeline` such as "fine-tune pi0 in the cloud as teacher, distill into SmolVLA, evaluate, deploy".
+
+The suggested pipeline is the best plan on paper. It is not always one this platform can run today, so check:
+
+- `pipeline_executable_here`: `true` only if every model in the pipeline can be trained here now.
+- `pipeline_blocked_by`: the models that cannot, with the reason.
+- `executable_alternative`: the best plan that does run here today, with its trade-offs, or `null` with a note when nothing runnable meets the requirements.
 
 !!! warning "How much to trust the ranking"
     Only `qortex/mlp-bc` has been run through the sim suite. Every other entry is scored from public specs. Treat those ranks as a shortlist to test, not a verdict.

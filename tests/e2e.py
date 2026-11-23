@@ -84,8 +84,60 @@ ds = c.create_dataset(r["id"])
 ds = c.upload_episodes(ds["id"], eps)
 assert ds["steps"] == 1000
 p = c.finetune(r["id"], ds["id"], epochs=30)
-assert p["latest_eval"]["mode"] == "offline" and p["latest_eval"]["action_mse"] < 0.01, p["latest_eval"]
-dep = c.deploy(p["id"], r["id"], max_action_mse=0.01)
+ev = p["latest_eval"]
+assert ev["mode"] == "offline" and ev["validated"] and ev["held_out_episodes"] == 4 and ev["scored_steps"] == 200, ev
+assert p["training"]["train_steps"] == 800, p["training"]           # the 4 held-out episodes were not trained on
+assert ev["action_mse"] < 0.02, ev
+st = c.distill(p["id"])
+assert st["latest_eval"]["validated"] and st["latest_eval"]["held_out_episodes"] == 4
+rec = c.recommend(robot_id=r["id"])
+mine = [x for x in rec["recommendations"] if x["model"] == "qortex/mlp-bc"][0]
+assert mine["evidence"] == "offline-check" and "not a closed-loop result" in " ".join(mine["why"]), mine
+
+# a single-episode dataset cannot be validated, and the gate refuses it
+r1 = c.create_robot("one-ep", "custom", obs_dim=4, action_dim=2)
+d1 = c.create_dataset(r1["id"]); c.upload_episodes(d1["id"], eps[:1])
+p1 = c.finetune(r1["id"], d1["id"], epochs=5)
+assert p1["latest_eval"]["validated"] is False
+try:
+    c.deploy(p1["id"], r1["id"], max_action_mse=1.0)
+    raise SystemExit("FAIL: unvalidated policy deployed")
+except QortexError as e:
+    assert e.status == 412 and "held-out" in e.message, e
+
+# tenant isolation: a second key cannot read, train on, or deploy the first key's objects
+other = Client.signup("other@example.com", URL)
+for path in (f"/v1/robots/{r['id']}", f"/v1/datasets/{ds['id']}", f"/v1/policies/{p['id']}", f"/v1/policies/{p['id']}/artifact",
+             f"/v1/robots/{r['id']}/deployment", f"/v1/robots/{r['id']}/deployments",
+             f"/v1/robots/{r['id']}/telemetry", f"/v1/evals/{p['latest_eval']['id']}", f"/v1/jobs/{p['job_id']}"):
+    try:
+        other.get(path)
+        raise SystemExit(f"FAIL: other key read {path}")
+    except QortexError as e:
+        assert e.status == 404, (path, e)
+for call in (lambda: other.act(p["id"], [0, 0, 0, 0]), lambda: other.deploy(p["id"], r["id"], force=True),
+             lambda: other.distill(p["id"], wait=False), lambda: other.rollback(r["id"]),
+             lambda: other.finetune(r["id"], ds["id"], wait=False)):
+    try:
+        call()
+        raise SystemExit("FAIL: other key acted on a foreign object")
+    except QortexError as e:
+        assert e.status == 404, e
+assert other.get("/v1/robots")["robots"] == [] and other.get("/v1/policies")["policies"] == []
+
+# validation errors name the field; empty telemetry is rejected
+for body, needle in (({}, "name"), ({"name": "x", "type": "nope"}, "type must be")):
+    try:
+        c.post("/v1/robots", body)
+        raise SystemExit("FAIL")
+    except QortexError as e:
+        assert e.status == 422 and needle in e.message, e
+try:
+    c.telemetry(r["id"])
+    raise SystemExit("FAIL: empty telemetry accepted")
+except QortexError as e:
+    assert e.status == 422
+dep = c.deploy(p["id"], r["id"], max_action_mse=0.02)
 assert dep["gate_passed"]
 try:
     c.upload_episodes(ds["id"], [{"observations": [[0, 0, 0]], "actions": [[0, 0]]}])
@@ -109,7 +161,14 @@ rec = c.recommend(robot={"type": "arm", "compute": "jetson-orin-nx-16"}, task={"
                   constraints={"deploy": "on_robot", "min_hz": 5})
 ids = [x["model"] for x in rec["recommendations"]]
 assert "qortex/mlp-bc" not in ids and "dream-labs/dream-1" not in ids and ids[0] == "lerobot/smolvla", ids
-assert rec["suggested_pipeline"]
+assert rec["suggested_pipeline"] and rec["pipeline_executable_here"] is False and rec["pipeline_blocked_by"], rec
+assert rec["executable_alternative"] is None and rec["executable_alternative_note"]      # nothing runnable does vision + language
+ok = c.recommend(robot={"type": "drone", "compute": "jetson-orin-nx-16"})
+assert ok["pipeline_executable_here"] is True and ok["pipeline_blocked_by"] == []
+spec = c.get("/openapi.json")
+art = spec["paths"]["/v1/policies/{id}/artifact"]["get"]["responses"]["200"]["content"]
+assert list(art) == ["application/octet-stream"], art
+assert "412" in spec["paths"]["/v1/deployments"]["post"]["responses"] and "401" in spec["paths"]["/v1/robots"]["get"]["responses"]
 rec = c.recommend(robot={"type": "arm", "compute": "jetson-orin-nx-16"}, task={"kind": "language"}, constraints={"deploy": "cloud"})
 assert any(x["access"] == "external-api" for x in rec["recommendations"])
 print("ok router", ids, "|", rec["recommendations"][0]["model"])

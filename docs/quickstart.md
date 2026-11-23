@@ -20,6 +20,8 @@ curl -s -X POST $QORTEX_URL/v1/keys -H 'content-type: application/json' \
 export QORTEX_API_KEY=qx_...
 ```
 
+The SDK reads both variables. `QORTEX_URL` defaults to `https://qortex.quantumroboticslab.ai`, so you only need to set it for a self-hosted server.
+
 ## 3. Register a robot
 
 ```python

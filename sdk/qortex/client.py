@@ -6,6 +6,9 @@ import urllib.error
 import urllib.request
 
 
+DEFAULT_URL = "https://qortex.quantumroboticslab.ai"
+
+
 class QortexError(Exception):
     def __init__(self, status, message):
         super().__init__(f"{status}: {message}")
@@ -15,7 +18,7 @@ class QortexError(Exception):
 class Client:
     def __init__(self, api_key=None, base_url=None):
         self.api_key = api_key or os.environ.get("QORTEX_API_KEY", "")
-        self.base_url = (base_url or os.environ.get("QORTEX_URL", "http://localhost:8000")).rstrip("/")
+        self.base_url = (base_url or os.environ.get("QORTEX_URL", DEFAULT_URL)).rstrip("/")
 
     # -- transport
     def _req(self, method, path, body=None, raw=False, timeout=90):
