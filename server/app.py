@@ -159,7 +159,13 @@ def _http_err(_, exc):
 
 @app.get("/healthz", include_in_schema=False)
 def healthz():
-    return {"ok": True, "version": app.version, "storage": db.storage(), "jobs": "in-request" if SYNC_JOBS else "worker"}
+    try:
+        n = db.q("SELECT count(*) FROM obj")[0][0]
+        database = {"reachable": True, "objects": n}
+    except Exception as e:  # noqa
+        database = {"reachable": False, "error": type(e).__name__}
+    return {"ok": database["reachable"], "version": app.version, "storage": db.storage(), "database": database,
+            "jobs": "in-request" if SYNC_JOBS else "worker"}
 
 
 class KeyIn(BaseModel):
