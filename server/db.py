@@ -11,7 +11,7 @@ import sqlite3
 import threading
 import time
 
-PG_URL = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL") or ""
+PG_URL = next((os.environ[k] for k in ("DATABASE_URL", "POSTGRES_URL", "STORAGE_URL") if os.environ.get(k)), "")
 _lock = threading.RLock()
 _conn = None
 
