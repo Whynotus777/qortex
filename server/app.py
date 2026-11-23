@@ -604,7 +604,8 @@ def worker_finish(id: str, body: FinishIn):
     return {"ok": True}
 
 
-# -- docs site. Built by mkdocs into ./public. On Vercel the platform serves public/ from its CDN.
-_site = os.path.join(os.path.dirname(os.path.dirname(__file__)), "public")
-if os.path.isdir(_site) and not os.environ.get("VERCEL"):
+# -- docs site, built by mkdocs into ./site. Declared last so every API route takes priority.
+# On Vercel, mounted static files are promoted to the CDN at build time.
+_site = os.path.join(os.path.dirname(os.path.dirname(__file__)), "site")
+if os.path.isdir(_site):
     app.mount("/", StaticFiles(directory=_site, html=True), name="docs")

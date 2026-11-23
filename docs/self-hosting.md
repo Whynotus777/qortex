@@ -24,7 +24,7 @@ On Vercel each training, distillation and eval job runs inside its HTTP request.
 
 ```bash
 pip install -r requirements.txt
-python scripts/build_docs.py                   # builds the docs into ./public
+python scripts/build_docs.py                   # builds the docs into ./site
 uvicorn server.app:app --port 8000
 python tests/e2e.py http://localhost:8000      # full pipeline, about 45 seconds
 ```

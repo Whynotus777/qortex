@@ -1,7 +1,7 @@
 site_name: Qortex Docs
 site_description: Model routing and a cloud-to-robot policy pipeline
 use_directory_urls: false
-site_dir: public
+site_dir: site
 theme:
   name: material
   palette:
