@@ -30,6 +30,7 @@ nav:
   - Status and limits: limits.md
 markdown_extensions:
   - admonition
+  - attr_list
   - pymdownx.superfences
   - pymdownx.tabbed: {alternate_style: true}
   - pymdownx.highlight: {anchor_linenums: true}
