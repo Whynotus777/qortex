@@ -40,6 +40,9 @@ class Client:
     def get(self, path):
         return self._req("GET", path)
 
+    def delete(self, path):
+        return self._req("DELETE", path)
+
     def post(self, path, body=None):
         return self._req("POST", path, body or {})
 
@@ -61,6 +64,20 @@ class Client:
     # -- objects
     def create_robot(self, name, type, compute=None, **kw):
         return self.post("/v1/robots", dict(name=name, type=type, compute=compute, **kw))
+
+    def attach_sim(self, robot_id, mjcf, task):
+        """Attach your own MuJoCo model and task spec to a custom robot."""
+        return self.post(f"/v1/robots/{robot_id}/sim", {"mjcf": mjcf, "task": task})
+
+    def get_sim(self, robot_id):
+        return self.get(f"/v1/robots/{robot_id}/sim")
+
+    def delete_robot(self, robot_id):
+        return self.delete(f"/v1/robots/{robot_id}")
+
+    def delete_account(self):
+        """Delete this API key and everything created with it."""
+        return self.delete("/v1/account")
 
     def create_dataset(self, robot_id, name="dataset"):
         return self.post("/v1/datasets", {"robot_id": robot_id, "name": name})

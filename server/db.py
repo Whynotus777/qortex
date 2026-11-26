@@ -114,3 +114,18 @@ def read_blob(id):
     if not rows:
         raise NotFound(f"blob '{id}' not found")
     return bytes(rows[0][0])
+
+
+def owned_ids(owner):
+    return [r[0] for r in q("SELECT id FROM obj WHERE owner=?", (owner,))]
+
+
+def delete_ids(ids):
+    """Delete objects and any blobs stored under the same ids."""
+    ids = list(dict.fromkeys(ids))
+    for i in range(0, len(ids), 200):
+        chunk = ids[i:i + 200]
+        marks = ",".join("?" * len(chunk))
+        q(f"DELETE FROM obj WHERE id IN ({marks})", chunk)
+        q(f"DELETE FROM blob WHERE id IN ({marks})", chunk)
+    return len(ids)

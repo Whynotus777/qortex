@@ -19,7 +19,8 @@ def run(client, robot_id, robot_type, episodes=10, seed=50_000, cache_dir="~/.qo
     agent = Agent(client, robot_id, cache_dir=cache_dir)
     if not agent.sync():
         raise SystemExit("no active deployment for this robot")
-    env, wins = envs.make(robot_type), 0
+    sim = client.get_sim(robot_id) if robot_type == "custom" else None
+    env, wins = envs.make(robot_type, sim), 0
     for ep in range(episodes):
         obs, done = env.reset(seed + ep), False
         while not done:
@@ -32,7 +33,8 @@ def run(client, robot_id, robot_type, episodes=10, seed=50_000, cache_dir="~/.qo
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--robot-id", required=True)
-    ap.add_argument("--type", required=True, choices=list(envs.ENVS))
+    ap.add_argument("--type", required=True, choices=list(envs.ENVS) + ["custom"],
+                    help="custom = a robot with an uploaded sim")
     ap.add_argument("--episodes", type=int, default=10)
     a = ap.parse_args()
     sr, stats, agent = run(Client(), a.robot_id, a.type, a.episodes)

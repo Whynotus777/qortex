@@ -71,6 +71,7 @@ None of the VLA backends exist yet.
 
 - Only a hash of each API key is stored, so a lost key cannot be recovered. Create a new one.
 - There is no rate limiting and no per-key quota.
+- `DELETE /v1/account` removes a key and everything created with it. There is no undo.
 - Signup is open by default, and every key can start training jobs on your server. Set `QORTEX_SIGNUP=0` once you have your keys.
 
 Do not expose this version to the public internet with data you care about.

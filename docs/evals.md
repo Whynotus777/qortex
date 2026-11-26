@@ -44,4 +44,6 @@ qx.deploy(policy_id, robot_id, min_success_rate=0.9)
 | `mobile-base` | Holonomic base drives to a random goal | Within 8 cm |
 | `drone` | Vehicle flies to a random 3D waypoint by velocity setpoints | Within 10 cm |
 
-These tasks are small on purpose so the pipeline runs on a CPU in seconds. Passing one says the pipeline works and the policy does that task in sim. It does not say the policy is safe on your hardware.
+A custom robot with an [uploaded sim](custom-sim.md) is evaluated the same way, in your model.
+
+The built-in tasks are small on purpose so the pipeline runs on a CPU in seconds. Passing one says the pipeline works and the policy does that task in sim. It does not say the policy is safe on your hardware.

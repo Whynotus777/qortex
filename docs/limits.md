@@ -18,8 +18,8 @@ This is version 0.1. It proves the pipeline end to end. Here is what it does not
 
 - Three small tasks. They are kinematic or near-kinematic and have no obstacles, sensor noise, latency or contact.
 - The drone task does not simulate rotors or attitude.
-- There is no way yet to upload your own MJCF or URDF as a sim twin.
-- Custom robots are validated offline on held-out episodes only. There is no closed-loop check for them.
+- You can [upload your own MuJoCo model](custom-sim.md), but only as one self-contained MJCF file with primitive geoms (no meshes), and only for reach-a-goal tasks. URDF is not accepted.
+- Custom robots without an uploaded sim are validated offline on held-out episodes only.
 - Eval latency is measured on the eval host, not on your robot's computer.
 
 ## Runtime

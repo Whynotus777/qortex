@@ -186,19 +186,23 @@ class DroneWaypoint(BaseNav):
 ENVS = {"arm-2dof": ArmReach, "mobile-base": BaseNav, "drone": DroneWaypoint}
 
 
-def make(robot_type):
+def make(robot_type, sim=None):
+    """sim: {"mjcf": str, "task": dict} for an uploaded sim; otherwise a built-in task."""
+    if sim:
+        from .simspec import SpecEnv
+        return SpecEnv(sim["mjcf"], sim["task"])
     if robot_type not in ENVS:
         raise KeyError(f"no sim task for robot type '{robot_type}'")
     return ENVS[robot_type]()
 
 
-def collect(robot_type, episodes, seed=0, noise=0.1):
+def collect(robot_type, episodes, seed=0, noise=0.1, sim=None):
     """Roll out the scripted expert. Returns (obs, actions, success_rate).
 
     Noise is added to the executed action, while the clean expert action is
     recorded. That gives the learner examples of recovering from mistakes.
     """
-    env = make(robot_type)
+    env = make(robot_type, sim)
     rng = np.random.default_rng(seed + 12345)
     O, A, wins = [], [], 0
     for ep in range(episodes):
@@ -210,13 +214,13 @@ def collect(robot_type, episodes, seed=0, noise=0.1):
             A.append(a)
             o, done, info = env.step(a + noise * rng.standard_normal(a.shape))
         wins += info["success"]
-    return np.array(O, np.float32), np.array(A, np.float32), wins / max(episodes, 1)
+    return np.array(O, np.float32), np.array(A, np.float32), wins / max(episodes, 1), env.horizon
 
 
-def evaluate(robot_type, policy_fn, episodes=50, seed=10_000):
+def evaluate(robot_type, policy_fn, episodes=50, seed=10_000, sim=None):
     """Closed-loop rollouts of policy_fn(obs) -> action on unseen seeds."""
     import time
-    env = make(robot_type)
+    env = make(robot_type, sim)
     wins, dists, lat = 0, [], []
     for ep in range(episodes):
         o = env.reset(seed + ep)
@@ -237,4 +241,5 @@ def evaluate(robot_type, policy_fn, episodes=50, seed=10_000):
         "latency_ms_p99": round(float(np.percentile(lat, 99)), 4),
         "max_control_hz_on_eval_host": int(1000 / max(np.percentile(lat, 99), 1e-6)),
         "success_tolerance_m": env.tol,
+        "task": env.description,
     }

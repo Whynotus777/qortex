@@ -4,6 +4,8 @@ The API server runs these on an inline thread. A remote worker (for
 example a GPU box) can run the same functions after claiming a job.
 """
 import io
+import json
+
 import numpy as np
 from . import envs, learn
 from .policy import Policy
@@ -40,9 +42,11 @@ def split(blob, holdout_episodes):
 
 def run(kind, p, blobs, log=print):
     """Returns (result_dict, artifact_bytes_or_None)."""
+    sim = json.loads(blobs["sim"]) if "sim" in blobs else None
+
     if kind == "generate":
-        obs, act, sr = envs.collect(p["robot_type"], p["episodes"], p.get("seed", 0), p.get("noise", 0.1))
-        lens = np.full(p["episodes"], envs.ENVS[p["robot_type"]].horizon, np.int64)
+        obs, act, sr, horizon = envs.collect(p["robot_type"], p["episodes"], p.get("seed", 0), p.get("noise", 0.1), sim=sim)
+        lens = np.full(p["episodes"], horizon, np.int64)
         if "dataset" in blobs:
             o0, a0 = unpack(blobs["dataset"])
             obs, act = np.concatenate([o0, obs]), np.concatenate([a0, act])
@@ -69,9 +73,9 @@ def run(kind, p, blobs, log=print):
     if kind == "eval":
         pol = Policy.from_bytes(blobs["policy"])
         if p["mode"] == "sim":
-            card = envs.evaluate(p["robot_type"], pol, p.get("episodes", 50), p.get("seed", 10_000))
+            card = envs.evaluate(p["robot_type"], pol, p.get("episodes", 50), p.get("seed", 10_000), sim=sim)
             card["mode"] = "sim"
-            card["task"] = envs.ENVS[p["robot_type"]].description
+            card["sim"] = "uploaded" if sim else "built-in"
         else:
             _, _, obs, act, held = split(blobs["dataset"], p.get("holdout_episodes", 0))
             validated = held > 0

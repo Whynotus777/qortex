@@ -30,6 +30,7 @@ qx.deploy(student["id"], robot["id"], min_success_rate=0.9)
 | Router over open and paid models | Working. Third-party models are ranked from published specs, not from our own benchmarks. |
 | Fine-tune, distill, quantize | Working for the built-in `qortex/mlp-bc` policy family. |
 | Sim evals | Working for `arm-2dof`, `mobile-base` and `drone`. |
+| Bring your own sim | Working: upload a self-contained MuJoCo model and a task spec for a custom robot. Reach-a-goal tasks, primitive geoms only. |
 | Gated deploys, rollback, on-robot runtime, telemetry | Working. |
 | Hosted inference | Working for policies trained here. |
 | Training VLA models (SmolVLA, pi0, GR00T, OpenVLA) | Not yet. Jobs are accepted and wait for a GPU worker backend that does not exist yet. |

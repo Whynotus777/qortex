@@ -1,5 +1,8 @@
 # Custom robot
 
+!!! tip
+    If you have a MuJoCo model of your robot, [upload it](../custom-sim.md). You then get sim data generation and closed-loop evals instead of the offline check described below.
+
 Use `custom` for any robot that is not one of the built-in types. You choose the observation and action sizes and upload your own data.
 
 ```python

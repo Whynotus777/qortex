@@ -7,6 +7,7 @@ Env:  DATABASE_URL (Postgres; else SQLite in QORTEX_DATA)   QORTEX_INLINE_WORKER
 """
 import base64
 import hashlib
+import json
 import os
 import secrets
 import threading
@@ -20,7 +21,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from qortex_core import envs, jobs
+from qortex_core import envs, jobs, simspec
 from qortex_core.policy import Policy, sha256
 from . import db, router
 
@@ -130,16 +131,60 @@ def _worker_loop():
 
 
 def _start_eval(owner, pol, episodes, seed=10_000):
-    mode = "sim" if pol["robot_type"] in envs.ENVS else "offline"
+    robot = db.get("robot", pol["robot_id"])
+    sim_id = robot.get("sim_id")
+    mode = "sim" if (pol["robot_type"] in envs.ENVS or sim_id) else "offline"
     ev = put("eval", owner, {"policy_id": pol["id"], "robot_type": pol["robot_type"], "mode": mode,
                             "episodes": episodes, "status": "queued", "scorecard": None})
     blobs = {"policy": pol["id"]}
     if mode == "offline":
         blobs["dataset"] = pol["dataset_id"]
+    if sim_id:
+        blobs["sim"] = sim_id
     job = enqueue(owner, "eval", {"mode": mode, "robot_type": pol["robot_type"], "episodes": episodes, "seed": seed,
                                   "holdout_episodes": pol.get("holdout_episodes", 0)},
                   blobs, ("eval", ev["id"]))
     return update("eval", ev["id"], job_id=job["id"])
+
+
+def _build_sim(sim):
+    """Validate an uploaded sim. Returns (env description dict, description text)."""
+    if not isinstance(sim, dict) or not isinstance(sim.get("mjcf"), str) or not isinstance(sim.get("task"), dict):
+        raise HTTPException(422, "sim must be {\"mjcf\": \"<mujoco>...\", \"task\": {...}}")
+    try:
+        env = simspec.SpecEnv(sim["mjcf"], sim["task"])
+        info = dict(simspec.describe(env), sanity=simspec.sanity(env))
+    except simspec.SpecError as e:
+        raise HTTPException(422, f"sim rejected: {e}")
+    return info, env.description
+
+
+def _store_sim(owner, sim, info):
+    rec = put("sim", owner, {"info": info})
+    write_blob(rec["id"], json.dumps({"mjcf": sim["mjcf"], "task": sim["task"]}).encode())
+    return rec
+
+
+def _sim_fields(sim_rec, info, description):
+    return {"sim_id": sim_rec["id"], "sim_task": description, "sim_info": info, "obs_spec": info["obs_spec"],
+            "action_spec": info["action_spec"], "control_hz": info["control_hz"]}
+
+
+def _robot_tree(owner, robot_id):
+    """Ids of a robot and everything that hangs off it."""
+    ids, pol_ids = [robot_id], []
+    for kind in ("dataset", "policy", "deployment", "telemetry"):
+        for o in listing(kind, owner, robot_id=robot_id):
+            ids.append(o["id"])
+            if kind == "policy":
+                pol_ids.append(o["id"])
+    ids += [e["id"] for e in listing("eval", owner) if e["policy_id"] in pol_ids]
+    robot = db.get("robot", robot_id)
+    if robot.get("sim_id"):
+        ids.append(robot["sim_id"])
+    have = set(ids)
+    ids += [j["id"] for j in listing("job", owner) if j.get("target") and j["target"][1] in have]
+    return ids
 
 
 # ---------------------------------------------------------------- app
@@ -238,7 +283,7 @@ def recommend(body: RecommendIn, owner: str = Depends(auth)):
     if body.constraints.deploy not in router.DEPLOY:
         raise HTTPException(422, f"constraints.deploy must be one of {router.DEPLOY}")
     measured = {}
-    for p in listing("policy", owner, robot_type=robot["type"]):
+    for p in listing("policy", owner, **({"robot_id": body.robot_id} if body.robot_id else {"robot_type": robot["type"]})):
         if p.get("latest_eval") and p["base_model"] not in measured:
             measured[p["base_model"]] = p["latest_eval"]
     return router.recommend(robot, body.task.model_dump(), body.constraints.model_dump(), measured)
@@ -251,8 +296,10 @@ class RobotIn(BaseModel):
     type: str = Field(..., description="arm-2dof | mobile-base | drone | custom")
     compute: Optional[str] = Field(None, description="A device id from GET /v1/devices")
     power_budget_w: Optional[float] = None
-    obs_dim: Optional[int] = Field(None, description="Required for type=custom")
-    action_dim: Optional[int] = Field(None, description="Required for type=custom")
+    obs_dim: Optional[int] = Field(None, description="Required for type=custom unless a sim is given")
+    action_dim: Optional[int] = Field(None, description="Required for type=custom unless a sim is given")
+    sim: Optional[dict] = Field(None, description="For type=custom: your own MuJoCo model and task, {mjcf, task}. "
+                                                  "Enables sim data generation and closed-loop evals")
     notes: str = ""
 
 
@@ -263,15 +310,73 @@ def create_robot(body: RobotIn, owner: str = Depends(auth)):
     if body.compute and body.compute not in router.DEVICES:
         raise HTTPException(422, f"unknown compute '{body.compute}'. See GET /v1/devices")
     d = body.model_dump()
+    sim = d.pop("sim")
     if body.type in envs.ENVS:
+        if sim:
+            raise HTTPException(422, "built-in robot types already have a sim. Use type=custom to upload your own")
         E = envs.ENVS[body.type]
         d.update(obs_dim=E.obs_dim, action_dim=E.action_dim, sim_task=E.description,
                  obs_spec=E.obs_spec, action_spec=E.action_spec, control_hz=20)
+    elif sim:
+        info, description = _build_sim(sim)
+        for k in ("obs_dim", "action_dim"):
+            if d[k] is not None and d[k] != info[k]:
+                raise HTTPException(422, f"{k}={d[k]} does not match the sim, which produces {k}={info[k]}")
+        d.update(obs_dim=info["obs_dim"], action_dim=info["action_dim"])
+        d.update(_sim_fields(_store_sim(owner, sim, info), info, description))
     elif not (body.obs_dim and body.action_dim):
-        raise HTTPException(422, "custom robots need obs_dim and action_dim")
+        raise HTTPException(422, "custom robots need obs_dim and action_dim, or a sim to derive them from")
     else:
         d.update(sim_task=None)
     return put("robot", owner, d)
+
+
+class SimIn(BaseModel):
+    mjcf: str = Field(..., description="A single self-contained MJCF file, as a string")
+    task: dict = Field(..., description="Task spec: point, goal, success, action, observation. See the docs")
+
+
+@app.post("/v1/robots/{id}/sim", tags=["Robots"], summary="Attach or replace a custom robot's sim")
+def attach_sim(id: str, body: SimIn, owner: str = Depends(auth)):
+    r = get("robot", id, owner)
+    if r["type"] != "custom":
+        raise HTTPException(422, "only custom robots take an uploaded sim")
+    sim = body.model_dump()
+    info, description = _build_sim(sim)
+    for k in ("obs_dim", "action_dim"):
+        if r[k] != info[k]:
+            raise HTTPException(422, f"the sim produces {k}={info[k]} but this robot has {k}={r[k]}. "
+                                     "Change the task spec, or register a new robot from this sim")
+    old = r.get("sim_id")
+    r = update("robot", id, **_sim_fields(_store_sim(owner, sim, info), info, description))
+    if old:
+        db.delete_ids([old])
+    return r
+
+
+@app.get("/v1/robots/{id}/sim", tags=["Robots"], summary="Download a custom robot's sim")
+def get_sim(id: str, owner: str = Depends(auth)):
+    r = get("robot", id, owner)
+    if not r.get("sim_id"):
+        raise HTTPException(404, "this robot has no uploaded sim")
+    return dict(json.loads(read_blob(r["sim_id"])), info=r["sim_info"])
+
+
+@app.delete("/v1/robots/{id}", tags=["Robots"], summary="Delete a robot and everything attached to it")
+def delete_robot(id: str, owner: str = Depends(auth)):
+    get("robot", id, owner)
+    ids = _robot_tree(owner, id)
+    for i in ids:
+        _policy_cache.pop(i, None)
+    return {"deleted": db.delete_ids(ids)}
+
+
+@app.delete("/v1/account", tags=["Auth"], summary="Delete this API key and all data created with it")
+def delete_account(owner: str = Depends(auth)):
+    ids = db.owned_ids(owner)
+    for i in ids:
+        _policy_cache.pop(i, None)
+    return {"deleted": db.delete_ids(ids + [owner]) - 1, "key_revoked": True}
 
 
 @app.get("/v1/robots", tags=["Robots"], summary="List robots")
@@ -341,9 +446,15 @@ def add_episodes(id: str, body: EpisodesIn, owner: str = Depends(auth)):
 @app.post("/v1/datasets/{id}/generate", tags=["Datasets"], summary="Generate demonstrations in sim")
 def generate(id: str, body: GenerateIn, owner: str = Depends(auth)):
     d = get("dataset", id, owner)
-    if d["robot_type"] not in envs.ENVS:
-        raise HTTPException(422, "sim generation is only available for built-in robot types. Upload episodes instead.")
+    robot = get("robot", d["robot_id"], owner)
+    sim_id = robot.get("sim_id")
+    if d["robot_type"] not in envs.ENVS and not sim_id:
+        raise HTTPException(422, "sim generation needs a sim. Use a built-in robot type, attach your own sim, or upload episodes")
+    if sim_id and not robot["sim_info"]["has_expert"]:
+        raise HTTPException(422, "this sim has no built-in expert (it needs action.mode delta_qpos and goal.via_qpos). Upload episodes instead")
     blobs = {"dataset": id} if d["steps"] else {}
+    if sim_id:
+        blobs["sim"] = sim_id
     update("dataset", id, status="generating")
     job = enqueue(owner, "generate", dict(body.model_dump(), robot_type=d["robot_type"]), blobs, ("dataset", id))
     return update("dataset", id, job_id=job["id"])
@@ -387,7 +498,8 @@ def create_policy(body: PolicyIn, owner: str = Depends(auth)):
         raise HTTPException(422, "dataset belongs to a different robot")
     backend = "native" if m["runnable"] else "gpu:" + m["id"]
     # No sim task for this robot type: reserve whole episodes so the offline eval is on unseen data.
-    holdout = 0 if r["type"] in envs.ENVS else (max(1, round(0.2 * d["episodes"])) if d["episodes"] >= 2 else 0)
+    has_sim = r["type"] in envs.ENVS or r.get("sim_id")
+    holdout = 0 if has_sim else (max(1, round(0.2 * d["episodes"])) if d["episodes"] >= 2 else 0)
     pol = put("policy", owner, {"name": body.name, "robot_id": r["id"], "robot_type": r["type"], "dataset_id": d["id"],
                                 "base_model": m["id"], "parent_policy_id": None, "stage": "finetuned", "quantize": "none",
                                 "status": "queued" if m["runnable"] else "waiting_for_gpu_worker",

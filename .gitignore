@@ -6,3 +6,4 @@ __pycache__/
 *.egg-info/
 .DS_Store
 .vercel/
+MUJOCO_LOG.TXT

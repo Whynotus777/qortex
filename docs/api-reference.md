@@ -34,6 +34,10 @@ Errors return JSON `{"error": "message"}` with these status codes:
 |---|---|---|---|---|
 | `email` | string | yes |  |  |
 
+### Delete this API key and all data created with it
+
+`DELETE /v1/account`
+
 ## Router
 
 ### List the model catalog
@@ -67,13 +71,31 @@ Errors return JSON `{"error": "message"}` with these status codes:
 | `type` | string | yes |  | arm-2dof | mobile-base | drone | custom |
 | `compute` | string/null | no |  | A device id from GET /v1/devices |
 | `power_budget_w` | number/null | no |  |  |
-| `obs_dim` | integer/null | no |  | Required for type=custom |
-| `action_dim` | integer/null | no |  | Required for type=custom |
+| `obs_dim` | integer/null | no |  | Required for type=custom unless a sim is given |
+| `action_dim` | integer/null | no |  | Required for type=custom unless a sim is given |
+| `sim` | object/null | no |  | For type=custom: your own MuJoCo model and task, {mjcf, task}. Enables sim data generation and closed-loop evals |
 | `notes` | string | no |  |  |
 
 ### List robots
 
 `GET /v1/robots`
+
+### Attach or replace a custom robot's sim
+
+`POST /v1/robots/{id}/sim`
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `mjcf` | string | yes |  | A single self-contained MJCF file, as a string |
+| `task` | object | yes |  | Task spec: point, goal, success, action, observation. See the docs |
+
+### Download a custom robot's sim
+
+`GET /v1/robots/{id}/sim`
+
+### Delete a robot and everything attached to it
+
+`DELETE /v1/robots/{id}`
 
 ### Get a robot
 
