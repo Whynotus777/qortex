@@ -67,9 +67,9 @@ jobs:
             tail -n 40 out.txt 2>/dev/null || echo "no test output"
             echo '```'
           } > body.md
-          n=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search '"Live test results" in:title' --json number --jq '.[0].number')
+          n=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title --jq '[.[] | select(.title=="Live test results")][0].number // empty')
           if [ -z "$n" ]; then
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "Live test results" --body "Automated results from the live-e2e workflow. Newest comment is the latest run."
-            n=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search '"Live test results" in:title' --json number --jq '.[0].number')
+            url=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "Live test results" --body "Automated results from the live-e2e workflow. Newest comment is the latest run.")
+            n="${url##*/}"
           fi
           gh issue comment "$n" --repo "$GITHUB_REPOSITORY" --body-file body.md
