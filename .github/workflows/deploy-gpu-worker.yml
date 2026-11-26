@@ -1,0 +1,33 @@
+name: Deploy GPU worker
+on:
+  workflow_dispatch:
+    inputs:
+      gpu:
+        description: Modal GPU type
+        default: L4
+      qortex_url:
+        description: Qortex host
+        default: https://qortex.quantumroboticslab.ai
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install modal
+      - name: Store worker secrets on Modal
+        env:
+          WT: ${{ secrets.QORTEX_WORKER_TOKEN }}
+          HF: ${{ secrets.HF_TOKEN }}
+          QURL: ${{ inputs.qortex_url }}
+        run: |
+          test -n "$MODAL_TOKEN_ID" -a -n "$WT" -a -n "$HF" || { echo "Add MODAL_TOKEN_ID, MODAL_TOKEN_SECRET, QORTEX_WORKER_TOKEN and HF_TOKEN as repository secrets"; exit 1; }
+          modal secret create qortex-worker "QORTEX_WORKER_TOKEN=$WT" "HF_TOKEN=$HF" "QORTEX_URL=$QURL" --force
+      - name: Deploy
+        env:
+          QORTEX_MODAL_GPU: ${{ inputs.gpu }}
+        run: modal deploy worker/gpu.py

@@ -9,10 +9,13 @@ import base64
 import hashlib
 import json
 import os
+import re
 import secrets
 import threading
 import time
 import traceback
+import urllib.error
+import urllib.request
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
@@ -69,10 +72,23 @@ def enqueue(owner, kind, params, blobs, target=None, backend="native"):
     return job
 
 
-def _finish(job, result, artifact):
+def _finish(job, result, artifact, artifact_uri=None, artifact_meta=None):
     """Apply a finished job's result to the object it was working on."""
     owner = db.owner_of(job["id"])
     kind, target = job["kind"], job["target"]
+    if artifact_uri and kind == "finetune":
+        # Weights too large to store here (a GPU-trained policy): keep a pointer, not the bytes.
+        pol = update("policy", target[1], status="ready", artifact_uri=artifact_uri, artifact_meta=artifact_meta or {},
+                     n_params=result.get("n_params"), sha256=None, size_bytes=result.get("size_bytes"), training=result, progress=None)
+        card = {"mode": "training-metrics", "validated": False, "success_rate": None, "final_loss": result.get("final_loss"),
+                "steps": result.get("steps_done"),
+                "note": "Training loss only. This platform has no closed-loop or held-out evaluation for this policy type yet, "
+                        "so the deploy gate will not pass it without force."}
+        ev = put("eval", owner, {"policy_id": pol["id"], "robot_type": pol["robot_type"], "mode": card["mode"], "episodes": 0,
+                                "status": "done", "scorecard": card})
+        update("policy", pol["id"], latest_eval={"id": ev["id"], **card})
+        update("job", job["id"], status="done", result=result, finished=round(time.time(), 3))
+        return
     if kind == "generate":
         write_blob(target[1], artifact)
         d = get("dataset", target[1])
@@ -112,13 +128,26 @@ def _fail(job, error, detail=""):
         update(job["target"][0], job["target"][1], status="failed", error=error)
 
 
-def _claim(backends):
+def _claim(backends, worker=None, lease_s=None):
+    """Hand out the oldest queued job for these backends. With lease_s, the job is leased: if the worker stops
+    sending heartbeats (a preempted GPU, say), the lease runs out and the job can be claimed again."""
+    now = time.time()
     with db._lock:
-        for j in db.queued_jobs():
-            if j["backend"] in backends:
-                update("job", j["id"], status="claimed")
-                return j
+        for j in db.jobs_in(["queued", "running"]):
+            if j["backend"] not in backends:
+                continue
+            if j["status"] == "running" and not (j.get("lease_until") and j["lease_until"] < now):
+                continue
+            fields = {"status": "running" if lease_s else "claimed", "attempts": j.get("attempts", 0) + 1, "worker": worker}
+            if lease_s:
+                fields["lease_until"] = now + lease_s
+            return update("job", j["id"], **fields)
     return None
+
+
+def _live_backends(window_s=600):
+    now = time.time()
+    return {b for w in listing("workerstat", "-") if now - w["last_seen"] < window_s for b in w["backends"]}
 
 
 def _worker_loop():
@@ -223,7 +252,7 @@ def healthz():
     except Exception as e:  # noqa
         database = {"reachable": False, "error": type(e).__name__}
     return {"ok": database["reachable"], "version": app.version, "commit": os.environ.get("VERCEL_GIT_COMMIT_SHA", "")[:7] or None,
-            "storage": db.storage(), "database": database,
+            "storage": db.storage(), "database": database, "gpu_workers": sorted(_live_backends()) if database["reachable"] else [],
             "jobs": "in-request" if SYNC_JOBS else "worker"}
 
 
@@ -286,7 +315,7 @@ def recommend(body: RecommendIn, owner: str = Depends(auth)):
     for p in listing("policy", owner, **({"robot_id": body.robot_id} if body.robot_id else {"robot_type": robot["type"]})):
         if p.get("latest_eval") and p["base_model"] not in measured:
             measured[p["base_model"]] = p["latest_eval"]
-    return router.recommend(robot, body.task.model_dump(), body.constraints.model_dump(), measured)
+    return router.recommend(robot, body.task.model_dump(), body.constraints.model_dump(), measured, _live_backends())
 
 
 # -- robots
@@ -394,6 +423,27 @@ def get_robot(id: str, owner: str = Depends(auth)):
 class DatasetIn(BaseModel):
     robot_id: str
     name: str = "dataset"
+    source: Optional[dict] = Field(None, description="Reference a LeRobot dataset on the Hugging Face Hub instead of uploading "
+                                                     "episodes: {\"type\": \"lerobot_hub\", \"repo_id\": \"user/name\"}. "
+                                                     "Needed for camera-based policies such as lerobot/act")
+
+
+def _hub_info(repo_id):
+    """Read a LeRobot dataset's meta/info.json from the Hub. Returns None when the check is switched off."""
+    if os.environ.get("QORTEX_SKIP_HUB_CHECK") == "1":
+        return None
+    url = f"https://huggingface.co/datasets/{repo_id}/resolve/main/meta/info.json"
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "qortex"}), timeout=10) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403, 404):
+            raise HTTPException(422, f"'{repo_id}' was not found on the Hugging Face Hub as a public LeRobot dataset "
+                                     "(no meta/info.json). For a private dataset add \"private\": true to source; "
+                                     "the GPU worker's HF token must be able to read it")
+        raise HTTPException(422, f"the Hugging Face Hub returned {e.code} for '{repo_id}'. Try again")
+    except Exception:  # noqa
+        raise HTTPException(422, f"could not reach the Hugging Face Hub to check '{repo_id}'. Try again")
 
 
 class Episode(BaseModel):
@@ -414,14 +464,37 @@ class GenerateIn(BaseModel):
 @app.post("/v1/datasets", tags=["Datasets"], summary="Create an empty dataset")
 def create_dataset(body: DatasetIn, owner: str = Depends(auth)):
     r = get("robot", body.robot_id, owner)
-    return put("dataset", owner, {"robot_id": r["id"], "robot_type": r["type"], "name": body.name, "episodes": 0,
-                                  "steps": 0, "status": "empty", "obs_dim": r["obs_dim"], "action_dim": r["action_dim"]})
+    base = {"robot_id": r["id"], "robot_type": r["type"], "name": body.name, "episodes": 0, "steps": 0, "status": "empty",
+            "obs_dim": r["obs_dim"], "action_dim": r["action_dim"], "source": None}
+    src = body.source
+    if not src:
+        return put("dataset", owner, base)
+    repo = str(src.get("repo_id", ""))
+    if src.get("type") != "lerobot_hub" or not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
+        raise HTTPException(422, "source must be {\"type\": \"lerobot_hub\", \"repo_id\": \"user/name\"}")
+    info = None if src.get("private") else _hub_info(repo)
+    summary = {}
+    if info:
+        feats = info.get("features", {})
+        summary = {"fps": info.get("fps"), "cameras": [k for k, v in feats.items() if v.get("dtype") in ("video", "image")],
+                   "state_dim": (feats.get("observation.state", {}).get("shape") or [None])[0],
+                   "action_dim": (feats.get("action", {}).get("shape") or [None])[0]}
+        for mine, theirs, what in ((r["action_dim"], summary["action_dim"], "action_dim"), (r["obs_dim"], summary["state_dim"], "obs_dim")):
+            if theirs is not None and mine != theirs:
+                raise HTTPException(422, f"this dataset has {what.replace('obs', 'state')}={theirs} but the robot has {what}={mine}")
+        base.update(episodes=int(info.get("total_episodes") or 0), steps=int(info.get("total_frames") or 0))
+    else:
+        base.update(episodes=1, steps=1)       # unknown until a worker opens it
+    base.update(status="ready", source={"type": "lerobot_hub", "repo_id": repo, "private": bool(src.get("private")), **summary})
+    return put("dataset", owner, base)
 
 
 @app.post("/v1/datasets/{id}/episodes", tags=["Datasets"], summary="Upload recorded episodes")
 def add_episodes(id: str, body: EpisodesIn, owner: str = Depends(auth)):
     import numpy as np
     d = get("dataset", id, owner)
+    if d.get("source"):
+        raise HTTPException(409, "this dataset references a Hub dataset; add episodes there")
     try:
         obs = np.concatenate([np.asarray(e.observations, np.float32) for e in body.episodes])
         act = np.concatenate([np.asarray(e.actions, np.float32) for e in body.episodes])
@@ -446,6 +519,8 @@ def add_episodes(id: str, body: EpisodesIn, owner: str = Depends(auth)):
 @app.post("/v1/datasets/{id}/generate", tags=["Datasets"], summary="Generate demonstrations in sim")
 def generate(id: str, body: GenerateIn, owner: str = Depends(auth)):
     d = get("dataset", id, owner)
+    if d.get("source"):
+        raise HTTPException(409, "this dataset references a Hub dataset; sim generation does not apply")
     robot = get("robot", d["robot_id"], owner)
     sim_id = robot.get("sim_id")
     if d["robot_type"] not in envs.ENVS and not sim_id:
@@ -475,6 +550,8 @@ class PolicyIn(BaseModel):
     hidden: list[int] = [256, 256]
     epochs: int = Field(40, ge=1, le=500)
     auto_eval: bool = True
+    steps: Optional[int] = Field(None, ge=100, le=1_000_000, description="Training steps, for GPU-trained models (default 20000)")
+    batch_size: Optional[int] = Field(None, ge=1, le=256, description="Batch size, for GPU-trained models (default 8)")
 
 
 class DistillIn(BaseModel):
@@ -496,6 +573,24 @@ def create_policy(body: PolicyIn, owner: str = Depends(auth)):
         raise HTTPException(409, f"dataset is '{d['status']}'. It must be ready and non-empty")
     if d["robot_id"] != r["id"]:
         raise HTTPException(422, "dataset belongs to a different robot")
+    if m.get("backend") == "lerobot":
+        if not d.get("source"):
+            raise HTTPException(422, f"{m['id']} learns from camera frames. Create the dataset with "
+                                     "source={\"type\": \"lerobot_hub\", \"repo_id\": \"user/name\"} instead of uploading state episodes")
+        steps = body.steps or 20000
+        pol = put("policy", owner, {"name": body.name, "robot_id": r["id"], "robot_type": r["type"], "dataset_id": d["id"],
+                                    "base_model": m["id"], "parent_policy_id": None, "stage": "finetuned", "quantize": "none",
+                                    "format": "lerobot", "status": "waiting_for_gpu_worker", "holdout_episodes": 0,
+                                    "auto_eval": False, "latest_eval": None})
+        job = enqueue(owner, "finetune", {"policy_type": m["id"].split("/")[1], "dataset_repo_id": d["source"]["repo_id"],
+                                          "steps": steps, "batch_size": body.batch_size or 8, "save_freq": max(500, steps // 10),
+                                          "policy_id": pol["id"]}, {}, ("policy", pol["id"]), "gpu:lerobot")
+        pol = update("policy", pol["id"], job_id=job["id"])
+        pol["message"] = ("A GPU worker is connected and will pick this job up within a few minutes." if "gpu:lerobot" in _live_backends()
+                          else "No GPU worker is connected. The job stays queued until one is. See the GPU worker guide in the docs.")
+        return pol
+    if d.get("source"):
+        raise HTTPException(422, f"{m['id']} cannot train on a Hub dataset reference. Use lerobot/act, or upload state episodes")
     backend = "native" if m["runnable"] else "gpu:" + m["id"]
     # No sim task for this robot type: reserve whole episodes so the offline eval is on unseen data.
     has_sim = r["type"] in envs.ENVS or r.get("sim_id")
@@ -519,6 +614,8 @@ def distill(id: str, body: DistillIn, owner: str = Depends(auth)):
     t = get("policy", id, owner)
     if t["status"] != "ready":
         raise HTTPException(409, f"teacher policy is '{t['status']}', not ready")
+    if t.get("artifact_uri"):
+        raise HTTPException(422, "distillation is not available for GPU-trained LeRobot policies yet")
     if body.quantize not in ("int8", "none"):
         raise HTTPException(422, "quantize must be int8 or none")
     pol = put("policy", owner, {"name": t["name"] + "-student", "robot_id": t["robot_id"], "robot_type": t["robot_type"],
@@ -552,6 +649,8 @@ def artifact(id: str, owner: str = Depends(auth)):
     p = get("policy", id, owner)
     if p["status"] != "ready":
         raise HTTPException(409, f"policy is '{p['status']}'")
+    if p.get("artifact_uri"):
+        raise HTTPException(409, f"this policy's weights are stored at {p['artifact_uri']}, not on Qortex. Load them with LeRobot")
     return Response(read_blob(id), media_type="application/octet-stream",
                     headers={"X-Qortex-Sha256": p["sha256"], "Content-Disposition": f'attachment; filename="{id}.npz"'})
 
@@ -568,6 +667,8 @@ def act(id: str, body: ActIn, owner: str = Depends(auth)):
     p = get("policy", id, owner)
     if p["status"] != "ready":
         raise HTTPException(409, f"policy is '{p['status']}'")
+    if p.get("artifact_uri"):
+        raise HTTPException(422, "hosted inference is not available for GPU-trained LeRobot policies")
     if id not in _policy_cache:
         _policy_cache[id] = Policy.from_bytes(read_blob(id))
     pol = _policy_cache[id]
@@ -591,6 +692,8 @@ def create_eval(body: EvalIn, owner: str = Depends(auth)):
     p = get("policy", body.policy_id, owner)
     if p["status"] != "ready":
         raise HTTPException(409, f"policy is '{p['status']}'")
+    if p.get("artifact_uri"):
+        raise HTTPException(422, "there is no evaluator for GPU-trained LeRobot policies on this platform yet")
     return _start_eval(owner, p, body.episodes, body.seed)
 
 
@@ -627,6 +730,8 @@ def deploy(body: DeployIn, owner: str = Depends(auth)):
     ev, passed, reason = p.get("latest_eval"), True, "gate passed"
     if not ev:
         passed, reason = False, "policy has no eval yet"
+    elif ev.get("mode") not in ("sim", "offline"):
+        passed, reason = False, "this policy has training metrics only: no closed-loop or held-out evaluation backs it"
     elif ev.get("mode") == "sim" and body.gate.min_success_rate is not None and ev["success_rate"] < body.gate.min_success_rate:
         passed, reason = False, f"sim success {ev['success_rate']:.0%} is below the gate {body.gate.min_success_rate:.0%}"
     elif ev.get("mode") == "offline" and not ev.get("validated"):
@@ -644,6 +749,7 @@ def deploy(body: DeployIn, owner: str = Depends(auth)):
                                    "version": len(listing("deployment", owner, robot_id=r["id"])) + 1,
                                    "gate": body.gate.model_dump(), "gate_passed": passed, "gate_reason": reason,
                                    "forced": bool(body.force and not passed), "sha256": p["sha256"],
+                                   "format": p.get("format", "qortex-npz"), "artifact_uri": p.get("artifact_uri"),
                                    "eval": ev, "previous_deployment_id": prev[0]["id"] if prev else None})
     return dep
 
@@ -659,7 +765,7 @@ def current(id: str, owner: str = Depends(auth)):
     d = _current(owner, id)
     if not d:
         raise HTTPException(404, "no active deployment for this robot")
-    return dict(d, artifact_path=f"/v1/policies/{d['policy_id']}/artifact")
+    return dict(d, artifact_path=None if d.get("artifact_uri") else f"/v1/policies/{d['policy_id']}/artifact")
 
 
 @app.post("/v1/robots/{id}/rollback", tags=["Deployments"], summary="Roll back to the previous deployment")
@@ -728,30 +834,61 @@ def _worker_auth(x_worker_token: str = Header(default="")):
 
 class ClaimIn(BaseModel):
     backends: list[str] = ["native"]
+    worker: Optional[str] = None
+    lease_seconds: Optional[int] = Field(None, ge=1, le=3600)
 
 
 @app.post("/v1/worker/claim", include_in_schema=False, dependencies=[Depends(_worker_auth)])
 def worker_claim(body: ClaimIn):
-    job = _claim(body.backends)
+    if body.worker:
+        db.put("workerstat", "-", {"backends": body.backends, "last_seen": time.time()},
+               id="wrk_" + re.sub(r"[^\w-]", "_", body.worker)[:40])
+    job = _claim(body.backends, body.worker, body.lease_seconds)
     if not job:
         return {"job": None}
     return {"job": {"id": job["id"], "kind": job["kind"], "params": job["params"], "backend": job["backend"],
+                    "attempts": job.get("attempts", 1),
                     "blobs": {k: base64.b64encode(read_blob(v)).decode() for k, v in job["blobs"].items()}}}
+
+
+class BeatIn(BaseModel):
+    progress: Optional[dict] = None
+    lease_seconds: int = Field(600, ge=1, le=3600)
+
+
+@app.post("/v1/worker/jobs/{id}/heartbeat", include_in_schema=False, dependencies=[Depends(_worker_auth)])
+def worker_heartbeat(id: str, body: BeatIn):
+    """Extends the job's lease. Returns cancelled=true if the job was deleted or already finished: the worker should stop."""
+    try:
+        job = db.get("job", id)
+    except db.NotFound:
+        return {"cancelled": True}
+    if job["status"] not in ("running", "claimed"):
+        return {"cancelled": True}
+    update("job", id, lease_until=time.time() + body.lease_seconds, progress=body.progress)
+    if job["target"] and job["target"][0] == "policy":
+        update("policy", job["target"][1], status="training", progress=body.progress)
+    return {"cancelled": False}
 
 
 class FinishIn(BaseModel):
     result: Optional[dict] = None
     artifact_b64: Optional[str] = None
+    artifact_uri: Optional[str] = Field(None, description="Where the weights live when they are too large to upload, e.g. hf://user/repo")
+    artifact_meta: Optional[dict] = None
     error: Optional[str] = None
 
 
 @app.post("/v1/worker/jobs/{id}/finish", include_in_schema=False, dependencies=[Depends(_worker_auth)])
 def worker_finish(id: str, body: FinishIn):
     job = get("job", id)
+    if job["status"] in ("done", "failed"):
+        return {"ok": True, "note": "already finished"}
     if body.error:
         _fail(job, body.error)
     else:
-        _finish(job, body.result, base64.b64decode(body.artifact_b64) if body.artifact_b64 else None)
+        _finish(job, body.result or {}, base64.b64decode(body.artifact_b64) if body.artifact_b64 else None,
+                body.artifact_uri, body.artifact_meta)
     return {"ok": True}
 
 

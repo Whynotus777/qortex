@@ -65,7 +65,7 @@ Jobs carry a `backend` name. Built-in policies use `native`. A fine-tune request
 2. Add a branch in `jobs.run()` that trains the model and returns an artifact.
 3. Teach the runtime to load that artifact format.
 
-None of the VLA backends exist yet.
+One GPU backend exists: `gpu:lerobot`, which trains ACT. See [Training ACT on a GPU](gpu-worker.md). None of the VLA backends exist yet.
 
 ## Security notes for this version
 

@@ -79,8 +79,12 @@ class Client:
         """Delete this API key and everything created with it."""
         return self.delete("/v1/account")
 
-    def create_dataset(self, robot_id, name="dataset"):
-        return self.post("/v1/datasets", {"robot_id": robot_id, "name": name})
+    def create_dataset(self, robot_id, name="dataset", hub_repo_id=None, private=False):
+        """hub_repo_id: reference a LeRobot dataset on the Hugging Face Hub (for camera-based policies)."""
+        body = {"robot_id": robot_id, "name": name}
+        if hub_repo_id:
+            body["source"] = {"type": "lerobot_hub", "repo_id": hub_repo_id, "private": private}
+        return self.post("/v1/datasets", body)
 
     def upload_episodes(self, dataset_id, episodes):
         """episodes: list of {"observations": [[...]], "actions": [[...]]}, actions in [-1, 1]."""

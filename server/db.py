@@ -129,3 +129,11 @@ def delete_ids(ids):
         q(f"DELETE FROM obj WHERE id IN ({marks})", chunk)
         q(f"DELETE FROM blob WHERE id IN ({marks})", chunk)
     return len(ids)
+
+
+def jobs_in(statuses):
+    out = []
+    for st in statuses:
+        rows = q("SELECT data FROM obj WHERE kind='job' AND data LIKE ? ORDER BY created", (f'%"status": "{st}"%',))
+        out += [j for j in (json.loads(r[0]) for r in rows) if j["status"] == st]
+    return sorted(out, key=lambda j: j["created"])

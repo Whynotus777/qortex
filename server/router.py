@@ -21,7 +21,12 @@ def _est_hz(model, device):
     return round(device["speed"] / model["params_b"], 1)
 
 
-def recommend(robot, task, constraints, measured=None):
+def trainable(m, live_backends=()):
+    """Can this model be trained right now? Native models always; others when a worker for their backend is connected."""
+    return bool(m["runnable"] or (m.get("backend") and "gpu:" + m["backend"] in live_backends))
+
+
+def recommend(robot, task, constraints, measured=None, live_backends=()):
     """measured: {model_id: latest sim scorecard} from this account, if any."""
     measured = measured or {}
     kind = task.get("kind", "single_task")
@@ -106,14 +111,16 @@ def recommend(robot, task, constraints, measured=None):
         elif m["runnable"]:
             score += 0.05
             why.append("can be trained and evaluated on this platform today")
-        if not m["runnable"] and m["access"] == "open-weights":
-            caveats.append("training this model needs a GPU worker with its backend, not yet available here")
+        can_train = trainable(m, live_backends)
+        if not can_train and m["access"] == "open-weights":
+            caveats.append("a GPU worker backend exists for this model, but no worker is connected right now" if m.get("backend")
+                           else "training this model needs a GPU worker with its backend, not yet available here")
 
         ranked.append({
             "model": m["id"], "name": m["name"], "access": m["access"], "license": m["license"],
             "score": round(max(score, 0), 3), "fit": fit, "evidence": ev,
             "estimated_hz": hz, "hz_is_estimate": hz is not None,
-            "runnable_here": m["runnable"], "why": why, "caveats": caveats,
+            "runnable_here": can_train, "why": why, "caveats": caveats,
         })
 
     ranked.sort(key=lambda r: -r["score"])
@@ -130,7 +137,7 @@ def recommend(robot, task, constraints, measured=None):
             pipeline = [f"fine-tune {teachers[0]['model']} in the cloud as teacher",
                         f"distill into {students[0] if students else 'a smaller student'}",
                         "evaluate student against teacher in sim", "deploy student to robot"]
-    blocked = [mid for mid in MODELS if pipeline and not MODELS[mid]["runnable"] and any(mid in st for st in pipeline)]
+    blocked = [mid for mid in MODELS if pipeline and not trainable(MODELS[mid], live_backends) and any(mid in st for st in pipeline)]
     runnable = [r for r in ranked if r["runnable_here"]]
     alternative = None
     if blocked and runnable:
@@ -139,7 +146,8 @@ def recommend(robot, task, constraints, measured=None):
                        "tradeoff": "; ".join(runnable[0]["caveats"]) or None}
     return {"recommendations": ranked, "excluded": excluded, "suggested_pipeline": pipeline,
             "pipeline_executable_here": bool(pipeline) and not blocked,
-            "pipeline_blocked_by": [{"model": mid, "reason": "no training backend for this model on this platform yet"} for mid in blocked],
+            "pipeline_blocked_by": [{"model": mid, "reason": "no GPU worker is connected for it right now" if MODELS[mid].get("backend")
+                                    else "no training backend for this model on this platform yet"} for mid in blocked],
             "executable_alternative": alternative,
             "executable_alternative_note": None if not blocked or alternative else
                 "No model that can be trained on this platform today meets these requirements.",

@@ -4,8 +4,9 @@ This is version 0.1. It proves the pipeline end to end. Here is what it does not
 
 ## Models
 
-- The only model family you can train here is `qortex/mlp-bc`: small state-based behavior-cloning networks. No vision, no language.
-- SmolVLA, ACT, pi0, GR00T and OpenVLA are in the catalog and the router. Fine-tune jobs for them are accepted and then wait, because no GPU worker backend exists yet.
+- The only model family that trains inside the API is `qortex/mlp-bc`: small state-based behavior-cloning networks. No vision, no language.
+- ACT trains on a [GPU worker you connect](gpu-worker.md). That path is tested against a stand-in trainer only and has not run on a real GPU. ACT policies have no evaluation here (training loss only), so the deploy gate never passes them without `force`, and the Qortex runtime cannot run them.
+- SmolVLA, pi0, GR00T and OpenVLA are in the catalog and the router. Fine-tune jobs for them are accepted and then wait, because no GPU worker backend exists yet.
 - Pi API and Dream API are listed for comparison only. Qortex does not call them.
 
 ## Router

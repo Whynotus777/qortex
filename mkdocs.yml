@@ -19,6 +19,7 @@ nav:
       - Sim evals and the deploy gate: evals.md
       - Bring your own sim: custom-sim.md
       - Distilling for the robot: distill.md
+      - Training ACT on a GPU: gpu-worker.md
       - On-robot runtime: runtime.md
   - Robot types:
       - Arm: robots/arm.md

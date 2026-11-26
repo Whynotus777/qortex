@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""Stand-in for lerobot-train used by tests: same flags, same checkpoint layout, no training."""
+import json, os, sys, time
+from pathlib import Path
+a = dict(x[2:].split("=", 1) for x in sys.argv[1:] if x.startswith("--"))
+if a.get("resume") == "true":
+    cfg = json.load(open(a["config_path"]))
+    start = cfg["done"]
+else:
+    cfg = {"out": a["output_dir"], "steps": int(a["steps"]), "save_freq": int(a["save_freq"]), "done": 0,
+           "dataset": a["dataset.repo_id"], "type": a["policy.type"]}
+    assert not Path(cfg["out"]).exists(), "output dir exists"
+    start = 0
+print("INFO num_total_params=51597190 (52M)")
+crash = int(os.environ.get("FAKE_CRASH_AT", 0))
+for step in range(start + cfg["save_freq"], cfg["steps"] + 1, cfg["save_freq"]):
+    time.sleep(float(os.environ.get("FAKE_STEP_S", 0.05)))
+    print(f"INFO step:{step/1000:g}K smpl:8K ep:10 epch:0.5 loss:{1.0/step*500:.3f} grdn:20.1 lr:1.0e-05")
+    d = Path(cfg["out"]) / "checkpoints" / "last" / "pretrained_model"
+    d.mkdir(parents=True, exist_ok=True)
+    cfg["done"] = step
+    (d / "train_config.json").write_text(json.dumps(cfg))
+    (d / "model.safetensors").write_bytes(b"x" * 1000)
+    sys.stdout.flush()
+    if crash and step >= crash and start == 0:
+        sys.exit(137)
+print("INFO End of training")

@@ -158,6 +158,89 @@ try:
     except QortexError as e:
         assert e.status == 422
 
+    # camera-based policies: a Hub dataset reference, trained by a GPU worker
+    def expect(status, fn):
+        try:
+            fn()
+        except QortexError as e:
+            assert e.status == status, (e.status, e)
+            return
+        raise SystemExit(f"FAIL: expected {status}")
+
+    gr = c.create_robot("pusht", "custom", obs_dim=2, action_dim=2, control_hz=10)
+    hub = c.create_dataset(gr["id"], hub_repo_id="lerobot/pusht")
+    assert hub["status"] == "ready" and hub["source"]["repo_id"] == "lerobot/pusht", hub
+    expect(422, lambda: c.post("/v1/datasets", {"robot_id": gr["id"], "source": {"type": "lerobot_hub", "repo_id": "nope"}}))
+    expect(409, lambda: c.upload_episodes(hub["id"], [{"observations": [[0, 0]], "actions": [[0, 0]]}]))
+    expect(422, lambda: c.finetune(gr["id"], hub["id"]))                              # state-only model on a Hub dataset
+    expect(422, lambda: c.finetune(r["id"], ds2["id"], base_model="lerobot/act"))     # ACT on state episodes
+    act = c.finetune(gr["id"], hub["id"], base_model="lerobot/act", steps=2000, batch_size=8)
+    assert act["status"] == "waiting_for_gpu_worker" and act["format"] == "lerobot", act
+    print("ok hub dataset + parked ACT job")
+
+    if os.environ.get("QORTEX_WORKER_TOKEN"):
+        # a GPU worker with a stand-in trainer: crash mid-run, lease expires, second attempt resumes and finishes
+        os.environ["QORTEX_URL"] = URL
+        os.environ["LEROBOT_TRAIN"] = os.path.join(ROOT, "tests", "fake", "lerobot-train")
+        os.environ["QORTEX_BEAT_S"] = "0.3"
+        from worker import gpu
+        gpu.LEASE_S = 2
+        runs = tempfile.mkdtemp()
+        uploads = []
+
+        def fake_upload(folder, policy_id):
+            uploads.append(sorted(os.listdir(folder)))
+            return f"hf://test/qortex-{policy_id}", {"repo_id": f"test/qortex-{policy_id}", "private": True}
+
+        job = gpu.claim("test-gpu")
+        assert job and job["params"]["dataset_repo_id"] == "lerobot/pusht" and job["attempts"] == 1, job
+        assert gpu.claim("test-gpu") is None                                          # leased: nobody else gets it
+        assert "gpu:lerobot" in c.get("/healthz")["gpu_workers"]
+        rec = c.recommend(robot_id=gr["id"], task={"kind": "single_task"}, constraints={"deploy": "on_robot"})
+        entry = [x for x in rec["recommendations"] if x["model"] == "lerobot/act"]
+        assert entry and entry[0]["runnable_here"], rec
+        os.environ["FAKE_CRASH_AT"] = "800"
+        assert gpu.run_job(job, runs_dir=runs, uploader=fake_upload) == "failed"
+        # a crash is reported as a failure; a preemption reports nothing. Simulate the second: requeue and let the lease lapse
+        act2 = c.finetune(gr["id"], hub["id"], base_model="lerobot/act", steps=2000)
+        job = gpu.claim("test-gpu")
+        mid = c.get(f"/v1/policies/{act2['id']}")
+        import subprocess
+        pr = subprocess.Popen(gpu.build_command(job["params"], os.path.join(runs, job["id"])), stdout=subprocess.DEVNULL)
+        assert pr.wait() == 137                                                       # dies without telling the server
+        time.sleep(2.5)
+        job2 = gpu.claim("test-gpu")
+        assert job2 and job2["id"] == job["id"] and job2["attempts"] == 2, job2
+        del os.environ["FAKE_CRASH_AT"]
+        assert "--resume=true" in gpu.build_command(job2["params"], os.path.join(runs, job2["id"]))
+        assert gpu.run_job(job2, runs_dir=runs, uploader=fake_upload) == "done"
+        done = c.get(f"/v1/policies/{act2['id']}")
+        assert done["status"] == "ready" and done["artifact_uri"].startswith("hf://"), done
+        assert done["training"]["steps_done"] == 2000 and done["n_params"] == 51597190, done
+        assert done["latest_eval"]["mode"] == "training-metrics" and not done["latest_eval"]["validated"]
+        assert uploads and "model.safetensors" in uploads[-1]
+        expect(409, lambda: c.download_artifact(done["id"]))
+        expect(422, lambda: c.act(done["id"], [0, 0]))
+        expect(422, lambda: c.distill(done["id"]))
+        expect(412, lambda: c.deploy(done["id"], gr["id"]))                            # training loss is not evidence
+        dep = c.deploy(done["id"], gr["id"], force=True)
+        assert dep["forced"] and dep["artifact_uri"] == done["artifact_uri"], dep
+        cur = c.current_deployment(gr["id"])
+        assert cur["artifact_path"] is None and cur["format"] == "lerobot", cur
+        from qortex.runtime import Agent
+        try:
+            Agent(c, gr["id"], cache_dir=tempfile.mkdtemp()).sync()
+            raise SystemExit("FAIL: runtime loaded a LeRobot policy")
+        except RuntimeError as e:
+            assert "LeRobot" in str(e)
+        # cancelling: delete the robot while a job is leased, the heartbeat says stop
+        act3 = c.finetune(gr["id"], hub["id"], base_model="lerobot/act", steps=20000)
+        job3 = gpu.claim("test-gpu")
+        os.environ["FAKE_STEP_S"] = "0.5"
+        c.delete_robot(gr["id"])
+        assert gpu.run_job(job3, runs_dir=runs, uploader=fake_upload) == "cancelled"
+        print("ok gpu worker: lease, crash, resume, external artifact, gate, cancel")
+
     # router behaviour
     rec = c.recommend(robot={"type": "arm", "compute": "jetson-orin-nx-16"}, task={"kind": "language", "needs_vision": True},
                       constraints={"deploy": "on_robot", "min_hz": 5})

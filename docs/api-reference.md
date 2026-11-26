@@ -111,6 +111,7 @@ Errors return JSON `{"error": "message"}` with these status codes:
 |---|---|---|---|---|
 | `robot_id` | string | yes |  |  |
 | `name` | string | no | `dataset` |  |
+| `source` | object/null | no |  | Reference a LeRobot dataset on the Hugging Face Hub instead of uploading episodes: {"type": "lerobot_hub", "repo_id": "user/name"}. Needed for camera-based policies such as lerobot/act |
 
 ### Upload recorded episodes
 
@@ -149,6 +150,8 @@ Errors return JSON `{"error": "message"}` with these status codes:
 | `hidden` | array | no | `[256, 256]` |  |
 | `epochs` | integer | no | `40` |  |
 | `auto_eval` | boolean | no | `True` |  |
+| `steps` | integer/null | no |  | Training steps, for GPU-trained models (default 20000) |
+| `batch_size` | integer/null | no |  | Batch size, for GPU-trained models (default 8) |
 
 ### List policies
 

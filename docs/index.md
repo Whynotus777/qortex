@@ -33,6 +33,7 @@ qx.deploy(student["id"], robot["id"], min_success_rate=0.9)
 | Bring your own sim | Working: upload a self-contained MuJoCo model and a task spec for a custom robot. Reach-a-goal tasks, primitive geoms only. |
 | Gated deploys, rollback, on-robot runtime, telemetry | Working. |
 | Hosted inference | Working for policies trained here. |
+| Training ACT (camera-based) | On a GPU you connect (Modal or your own). Built, not yet run on a real GPU. See [Training ACT on a GPU](gpu-worker.md). |
 | Training VLA models (SmolVLA, pi0, GR00T, OpenVLA) | Not yet. Jobs are accepted and wait for a GPU worker backend that does not exist yet. |
 
 Read [Status and limits](limits.md) before you put a policy on real hardware.

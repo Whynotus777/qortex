@@ -40,6 +40,9 @@ class Agent:
             return self._load_cached()
         if self.deployment and dep["id"] == self.deployment["id"]:
             return False
+        if dep.get("artifact_uri"):
+            raise RuntimeError(f"this deployment is a LeRobot policy stored at {dep['artifact_uri']}. "
+                               "The Qortex runtime only runs its own .npz policies; load this one with LeRobot on the robot")
         path = os.path.join(self.cache_dir, f"{dep['sha256']}.npz")
         if not os.path.exists(path):
             blob = self.client.download_artifact(dep["policy_id"])
