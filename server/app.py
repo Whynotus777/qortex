@@ -177,7 +177,8 @@ def healthz():
         database = {"reachable": True, "objects": n}
     except Exception as e:  # noqa
         database = {"reachable": False, "error": type(e).__name__}
-    return {"ok": database["reachable"], "version": app.version, "storage": db.storage(), "database": database,
+    return {"ok": database["reachable"], "version": app.version, "commit": os.environ.get("VERCEL_GIT_COMMIT_SHA", "")[:7] or None,
+            "storage": db.storage(), "database": database,
             "jobs": "in-request" if SYNC_JOBS else "worker"}
 
 

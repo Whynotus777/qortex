@@ -1,0 +1,75 @@
+# Runs the full end-to-end test against the live API and posts the result
+# to the "Live test results" issue. Triggered by pushes that touch the
+# server, core, SDK or tests, and on demand from the Actions tab.
+name: live-e2e
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["server/**", "qortex_core/**", "sdk/**", "tests/**", "examples/**", ".github/workflows/live-e2e.yml"]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: live-e2e
+  cancel-in-progress: true
+
+env:
+  QORTEX_URL: https://qortex.quantumroboticslab.ai
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy mujoco
+
+      - name: Wait for Vercel to serve this commit
+        run: |
+          want="${GITHUB_SHA:0:7}"
+          for i in $(seq 1 40); do
+            got=$(curl -fsS "$QORTEX_URL/healthz?t=$i" | python -c "import sys,json; print(json.load(sys.stdin).get('commit'))" || true)
+            if [ "$got" = "$want" ]; then echo "live commit is $got"; exit 0; fi
+            echo "waiting: live=$got want=$want"; sleep 15
+          done
+          echo "::warning::live site never reported commit $want; testing whatever is deployed"
+
+      - name: Health before
+        run: curl -fsS "$QORTEX_URL/healthz?t=before" | tee before.json
+
+      - name: Run end-to-end test against the live API
+        run: |
+          set -o pipefail
+          python tests/e2e.py "$QORTEX_URL" 2>&1 | tee out.txt
+
+      - name: Post result
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTCOME: ${{ job.status }}
+        run: |
+          curl -fsS "$QORTEX_URL/healthz?t=after" > after.json || echo '{}' > after.json
+          {
+            echo "### ${OUTCOME^^} at $(date -u +'%Y-%m-%d %H:%M UTC') for \`${GITHUB_SHA:0:7}\`"
+            echo
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "Health before: \`$(cat before.json 2>/dev/null || echo unavailable)\`"
+            echo "Health after: \`$(cat after.json)\`"
+            echo
+            echo '```'
+            tail -n 40 out.txt 2>/dev/null || echo "no test output"
+            echo '```'
+          } > body.md
+          n=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search '"Live test results" in:title' --json number --jq '.[0].number')
+          if [ -z "$n" ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "Live test results" --body "Automated results from the live-e2e workflow. Newest comment is the latest run."
+            n=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search '"Live test results" in:title' --json number --jq '.[0].number')
+          fi
+          gh issue comment "$n" --repo "$GITHUB_REPOSITORY" --body-file body.md
